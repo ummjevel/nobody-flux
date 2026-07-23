@@ -1,4 +1,5 @@
 """Loads configs/models.yaml and instantiates named ASR/LLM/TTS presets.
+Also loads configs/voices.yaml for TTS reference-clip selection (resolve_voice).
 
 This is the "swap models via config, not code" layer: scripts/run_pipeline.py
 and scripts/talk.py both go through build_asr/build_llm/build_tts instead of
@@ -20,6 +21,7 @@ from . import asr, llm, tts
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
+VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -89,3 +91,38 @@ def default_preset(stage: str) -> str:
     just want to log/display which preset is active (see scripts/talk.py).
     """
     return _load_config()["defaults"][stage]
+
+
+def _load_voices_config() -> dict[str, Any]:
+    with open(VOICES_CONFIG_PATH, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def resolve_voice(name: str | None = None) -> Path:
+    """A voice is a TTS *parameter* (reference_audio), not a separate preset --
+    pass the result to build_tts(..., reference_audio=resolve_voice(name)).
+
+    Files aren't committed (see .gitignore); this raises FileNotFoundError
+    with the expected path if the voice hasn't been dropped in yet, rather
+    than letting NobodyTTS fail deep inside a subprocess call with a less
+    obvious error.
+    """
+    config = _load_voices_config()
+    name = name or config["default"]
+    try:
+        entry = config["voices"][name]
+    except KeyError:
+        available = ", ".join(sorted(config["voices"]))
+        raise ValueError(f"Unknown voice '{name}'. Available: {available}") from None
+
+    path = PROJECT_ROOT / entry["path"]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Voice '{name}' is registered in configs/voices.yaml but {path} "
+            "doesn't exist yet -- place the reference wav there first."
+        )
+    return path
+
+
+def list_voices() -> list[str]:
+    return sorted(_load_voices_config()["voices"])

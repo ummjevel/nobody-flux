@@ -24,8 +24,10 @@ models/**/*.onnx
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/
 
-# Audio / conversation data (reference voice clip, recorded turns, DB)
+# Audio / conversation data (reference voice clips, recorded turns, DB) --
+# these are personal voice recordings, never ship them in a public repo.
 data/*.wav
+data/voices/
 data/sessions/
 data/*.db
 data/*.db-journal

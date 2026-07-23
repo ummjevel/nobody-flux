@@ -1,0 +1,29 @@
+# TTS reference-clip presets for MOSS-TTS-Nano's voice_clone mode (zero-shot --
+# no training, just a clip to copy the voice characteristics from). Separate
+# from models.yaml because a voice is a TTS *parameter*, not a different TTS
+# implementation -- swapping voices doesn't change which class runs.
+#
+# Files are NOT committed (see .gitignore's data/voices/ rule) -- these are
+# personal voice recordings, not something to ship in a public repo. Place the
+# actual wav files at the paths below before selecting a voice with --voice.
+#
+# Expected format: mono wav, 16kHz (matches the placeholder this replaces).
+# No hard duration requirement found in MOSS-TTS-Nano's own docs; a few
+# seconds to ~30s of clean single-speaker audio is the general zero-shot-TTS
+# norm.
+
+default: male-1
+
+voices:
+  male-1:
+    path: data/voices/male_1.wav
+    gender: male
+  male-2:
+    path: data/voices/male_2.wav
+    gender: male
+  female-1:
+    path: data/voices/female_1.wav
+    gender: female
+  female-2:
+    path: data/voices/female_2.wav
+    gender: female

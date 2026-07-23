@@ -40,8 +40,17 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 인식 확인, SenseVoice ASR 모델 자산 다운로드, MOSS-TTS-Nano를 `external/`에 클론하고
 **독립된 venv**를 만들어줌 (이유는 아래 "알려진 제약" 참고).
 
-TTS의 voice-clone 참조 음성이 필요하다 (`data/reference_voice_16k.wav`, 16kHz mono wav) —
-저장소에 포함돼 있지 않으니 직접 준비해서 그 경로에 둘 것.
+TTS의 voice-clone 참조 음성이 필요하다 — 저장소에 포함돼 있지 않으니 직접 준비해서 둘 것
+(개인 음성 녹음이라 공개 레포에 커밋 안 함, `.gitignore` 참고). 두 가지 방법:
+
+- **여러 목소리 중 선택** (`--voice` 플래그): `configs/voices.yaml`에 등록된 이름(`male-1`,
+  `male-2`, `female-1`, `female-2`)에 맞춰 `data/voices/{male_1,male_2,female_1,female_2}.wav`에
+  파일을 두면 `--voice male-1` 식으로 선택 가능. 없는 이름을 쓰거나 파일을 안 두면
+  `resolve_voice()`가 바로 에러를 내서 어디에 뭘 둬야 하는지 알려준다.
+- **기본값 하나만**: `data/reference_voice_16k.wav`에 파일 하나만 두면 `--voice` 없이도
+  동작 (모든 프리셋의 기본 참조 음성).
+
+포맷은 mono wav, 16kHz 권장.
 
 ### 2. 대화하기
 
@@ -65,12 +74,13 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav
 
 ```bash
 uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
-    --asr sense-voice-small --llm qwen3-0.6b --tts moss-tts-nano
+    --asr sense-voice-small --llm qwen3-0.6b --tts moss-tts-nano --voice female-2
 ```
 
-프리셋은 `configs/models.yaml`에 등록돼 있다. 지금은 스테이지당 프리셋이 1개씩뿐이지만,
-새 후보 모델을 붙이는 구조는 갖춰져 있다 — 자세한 절차는 `docs/FEATURES.md`의 "프리셋 추가
-하는 법" 참고.
+ASR/LLM/TTS 프리셋은 `configs/models.yaml`, 목소리는 `configs/voices.yaml`에 등록돼 있다
+(목소리는 별도 프리셋 축이 아니라 TTS 스테이지의 파라미터 하나라 따로 관리됨). 지금은
+스테이지당 프리셋이 1개씩뿐이지만, 새 후보 모델을 붙이는 구조는 갖춰져 있다 — 자세한 절차는
+`docs/FEATURES.md`의 "프리셋 추가하는 법" 참고.
 
 ### 4. 대화 기록 확인
 
@@ -85,7 +95,7 @@ src/nobody_flux/
   asr.py, llm.py, tts.py   # 각 스테이지 구현 (NobodyASR/NobodyLLM/NobodyTTS)
   persona.py               # 시스템 프롬프트 ("루카스" 페르소나)
   pipeline.py               # ASR→LLM→TTS 오케스트레이션 + 스테이지별 소요시간 계측
-  registry.py               # configs/models.yaml → 프리셋 인스턴스 생성
+  registry.py               # configs/{models,voices}.yaml → 프리셋/음성 인스턴스 생성
   vad.py                    # 에너지 기반 발화 구간 검출
   storage.py                 # SQLite 대화 저장 (sessions/turns/memories)
 scripts/
@@ -94,6 +104,7 @@ scripts/
   setup_local.sh / setup_server.sh / setup_common.sh
   env.sh                     # LD_LIBRARY_PATH 세팅 (source 필수)
 configs/models.yaml         # ASR/LLM/TTS 프리셋 정의
+configs/voices.yaml          # TTS 참조 음성(voice-clone) 프리셋 정의
 docs/                        # 리서치, 기능 정의, 기억 설계 문서
 ```
 

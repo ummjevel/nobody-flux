@@ -8,10 +8,12 @@ and for comparing --asr/--llm/--tts presets on a fixed input file.
 
 Usage (from the project root):
     uv run python scripts/run_pipeline.py --wav-in path/to/input.wav --wav-out path/to/output.wav \\
-        [--asr PRESET] [--llm PRESET] [--tts PRESET]
+        [--asr PRESET] [--llm PRESET] [--tts PRESET] [--voice VOICE]
 
 Preset names come from configs/models.yaml (registry.py); omit a flag to use
-that stage's default preset.
+that stage's default preset. --voice picks a TTS reference clip from
+configs/voices.yaml (registry.resolve_voice) -- it's a parameter of the TTS
+stage, not a separate preset dimension.
 """
 
 import argparse
@@ -33,12 +35,17 @@ def main():
     parser.add_argument("--asr", default=None, help="ASR preset name (configs/models.yaml)")
     parser.add_argument("--llm", default=None, help="LLM preset name (configs/models.yaml)")
     parser.add_argument("--tts", default=None, help="TTS preset name (configs/models.yaml)")
+    parser.add_argument("--voice", default=None, help="TTS reference voice (configs/voices.yaml)")
     args = parser.parse_args()
+
+    tts_overrides = {}
+    if args.voice:
+        tts_overrides["reference_audio"] = registry.resolve_voice(args.voice)
 
     pipeline = STSPipeline(
         asr=registry.build_asr(args.asr),
         llm=registry.build_llm(args.llm),
-        tts=registry.build_tts(args.tts),
+        tts=registry.build_tts(args.tts, **tts_overrides),
     )
     result = pipeline.run(args.wav_in, args.wav_out)
 
