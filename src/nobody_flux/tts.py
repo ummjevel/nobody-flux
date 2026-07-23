@@ -42,25 +42,27 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-MOSS_TTS_NANO_REPO = Path(__file__).resolve().parents[2] / "external" / "MOSS-TTS-Nano"
-DEFAULT_REFERENCE_AUDIO = (
-    Path(__file__).resolve().parents[2] / "data" / "reference_voice_16k.wav"
-)
+from .paths import PROJECT_ROOT
+
+MOSS_TTS_NANO_REPO = PROJECT_ROOT / "external" / "MOSS-TTS-Nano"
+DEFAULT_REFERENCE_AUDIO = PROJECT_ROOT / "data" / "reference_voice_16k.wav"
 
 
 @dataclass
 class NobodyTTS:
     repo_dir: Path = MOSS_TTS_NANO_REPO
     reference_audio: Path = DEFAULT_REFERENCE_AUDIO
-    # "auto" (i.e. CUDA if visible) crashes on the RTX 5090 dev box with
+    # Real default lives in configs/models.yaml's tts preset params, not here --
+    # this is just the fallback for constructing NobodyTTS directly (tests,
+    # a REPL). "auto" (CUDA if visible) crashes on the RTX 5090 dev box with
     # "no kernel image is available for execution on the device": MOSS-TTS-Nano's
     # own venv pins torch==2.7.0/cu126, whose prebuilt kernels predate Blackwell
     # (sm_120) -- confirmed by hand, not a hypothetical. CPU sidesteps this
     # entirely and matches the model's own official spec ("4-core CPU, zero GPU
-    # realtime" -- see docs/output/ondevice_asr_llm_tts_research_20260716.md),
-    # so this isn't even a compromise. Override to "cuda" explicitly on
-    # hardware where MOSS-TTS-Nano's pinned torch build actually has matching
-    # kernels (e.g. H100/sm_90, well within cu126's supported range).
+    # realtime"), so this isn't even a compromise. Hardware where MOSS-TTS-Nano's
+    # pinned torch build actually has matching kernels (e.g. H100/sm_90, well
+    # within cu126's range) can override via --tts preset params or a new
+    # preset, not a code edit -- that's the point of configs/models.yaml.
     device: str = "cpu"
     # infer.py loads its own model on each invocation (no server/warm process),
     # so a stuck load or hung generation would otherwise block forever with no

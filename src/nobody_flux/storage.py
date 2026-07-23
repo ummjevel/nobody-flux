@@ -12,17 +12,23 @@ Three tables:
     more presets exist in configs/models.yaml (see registry.py)
   - memories: schema only for now. Nothing writes to this table yet -- see
     docs/memory-design.md for the extraction design this is waiting on.
+
+One connection per ConversationStore, opened once and kept for the instance's
+lifetime (not reopened + re-CREATE-TABLE'd on every call) -- talk.py logs a
+turn every exchange, and open/close-per-call is real I/O overhead to repeat on
+every turn, particularly on the eventual SD-card-backed CM4 target.
 """
 
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "conversations.db"
+from .paths import PROJECT_ROOT
+
+DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "conversations.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -67,31 +73,31 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.executescript(_SCHEMA)
-    return conn
-
-
 @dataclass
 class ConversationStore:
     db_path: Path = DEFAULT_DB_PATH
+    _conn: sqlite3.Connection = field(init=False, repr=False)
 
     def __post_init__(self):
         self.db_path = Path(self.db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.db_path)
+        self._conn.executescript(_SCHEMA)
+
+    def close(self) -> None:
+        self._conn.close()
 
     def start_session(self) -> int:
         """Open a new session row, return its id."""
-        with closing(_connect(self.db_path)) as conn, conn:
-            cur = conn.execute(
+        with self._conn:
+            cur = self._conn.execute(
                 "INSERT INTO sessions (started_at) VALUES (?)", (_now(),)
             )
             return cur.lastrowid
 
     def end_session(self, session_id: int) -> None:
-        with closing(_connect(self.db_path)) as conn, conn:
-            conn.execute(
+        with self._conn:
+            self._conn.execute(
                 "UPDATE sessions SET ended_at = ? WHERE id = ?", (_now(), session_id)
             )
 
@@ -111,8 +117,8 @@ class ConversationStore:
         llm_ms: int | None = None,
         tts_ms: int | None = None,
     ) -> int:
-        with closing(_connect(self.db_path)) as conn, conn:
-            cur = conn.execute(
+        with self._conn:
+            cur = self._conn.execute(
                 """
                 INSERT INTO turns (
                     session_id, turn_index, ts, user_text, reply_text,

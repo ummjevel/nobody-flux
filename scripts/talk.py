@@ -32,35 +32,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import soundfile as sf
 import sounddevice as sd
 
-from src.nobody_flux import registry
-from src.nobody_flux.pipeline import STSPipeline
+from _cli import add_pipeline_args, build_pipeline_from_args
+from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
 from src.nobody_flux.vad import VoiceActivityDetector
 
-SESSION_AUDIO_DIR = Path(__file__).resolve().parents[1] / "data" / "sessions"
+SESSION_AUDIO_DIR = PROJECT_ROOT / "data" / "sessions"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--asr", default=None, help="ASR preset name (configs/models.yaml)")
-    parser.add_argument("--llm", default=None, help="LLM preset name (configs/models.yaml)")
-    parser.add_argument("--tts", default=None, help="TTS preset name (configs/models.yaml)")
-    parser.add_argument("--voice", default=None, help="TTS reference voice (configs/voices.yaml)")
+    add_pipeline_args(parser)
     args = parser.parse_args()
 
-    tts_overrides = {}
-    if args.voice:
-        tts_overrides["reference_audio"] = registry.resolve_voice(args.voice)
-
     print("Loading models...")
-    pipeline = STSPipeline(
-        asr=registry.build_asr(args.asr),
-        llm=registry.build_llm(args.llm),
-        tts=registry.build_tts(args.tts, **tts_overrides),
-    )
-    asr_preset = args.asr or registry.default_preset("asr")
-    llm_preset = args.llm or registry.default_preset("llm")
-    tts_preset = args.tts or registry.default_preset("tts")
+    pipeline, presets = build_pipeline_from_args(args)
     vad = VoiceActivityDetector()
     store = ConversationStore()
     session_id = store.start_session()
@@ -96,9 +82,9 @@ def main():
                 result["reply_text"],
                 user_wav_path=str(wav_in),
                 reply_wav_path=str(wav_out),
-                asr_preset=asr_preset,
-                llm_preset=llm_preset,
-                tts_preset=tts_preset,
+                asr_preset=presets["asr"],
+                llm_preset=presets["llm"],
+                tts_preset=presets["tts"],
                 asr_ms=result["asr_ms"],
                 llm_ms=result["llm_ms"],
                 tts_ms=result["tts_ms"],
@@ -107,6 +93,7 @@ def main():
         pass
     finally:
         store.end_session(session_id)
+        store.close()
         print(f"\nSession {session_id} ended ({turn_index} turns).")
 
 

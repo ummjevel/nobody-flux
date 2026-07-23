@@ -38,3 +38,9 @@ tts:
     params:
       repo_dir: external/MOSS-TTS-Nano
       reference_audio: data/reference_voice_16k.wav
+      # cpu, not auto/cuda: MOSS-TTS-Nano's isolated venv pins torch==2.7.0/cu126,
+      # whose kernels predate RTX 5090/Blackwell (sm_120) -- confirmed by hand,
+      # see src/nobody_flux/tts.py's NobodyTTS.device comment. On hardware where
+      # that torch build's kernels actually match (e.g. H100/sm_90), add a
+      # moss-tts-nano-cuda preset with device: cuda rather than editing this one.
+      device: cpu

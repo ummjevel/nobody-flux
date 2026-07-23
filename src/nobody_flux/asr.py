@@ -16,6 +16,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .paths import PROJECT_ROOT
+
 # sherpa-onnx's compiled extension dlopen()s a bare "libonnxruntime.so", but the
 # onnxruntime pip wheel only ships the versioned "libonnxruntime.so.1.27.0" --
 # without a same-directory unversioned symlink, `import sherpa_onnx` raises
@@ -28,16 +30,7 @@ from pathlib import Path
 # scripts/env.sh (source it, or `export $(cat scripts/env.sh | ...)`-style use)
 # and the project README.
 for _versioned in glob.glob(
-    str(
-        Path(__file__).resolve().parents[2]
-        / ".venv"
-        / "lib"
-        / "*"
-        / "site-packages"
-        / "onnxruntime"
-        / "capi"
-        / "libonnxruntime.so.*"
-    )
+    str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages" / "onnxruntime" / "capi" / "libonnxruntime.so.*")
 ):
     _unversioned = os.path.join(str(Path(_versioned).parent), "libonnxruntime.so")
     if not os.path.exists(_unversioned):
@@ -46,7 +39,7 @@ for _versioned in glob.glob(
 import sherpa_onnx  # noqa: E402 -- needs LD_LIBRARY_PATH set (see above) before this import
 import soundfile as sf  # noqa: E402
 
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "sense-voice"
+DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "sense-voice"
 
 
 @dataclass

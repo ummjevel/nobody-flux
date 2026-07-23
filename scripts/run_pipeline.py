@@ -22,8 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.nobody_flux import registry
-from src.nobody_flux.pipeline import STSPipeline
+from _cli import add_pipeline_args, build_pipeline_from_args
 
 
 def main():
@@ -32,21 +31,10 @@ def main():
     parser.add_argument(
         "--wav-out", required=True, help="output wav (nobody's spoken reply)"
     )
-    parser.add_argument("--asr", default=None, help="ASR preset name (configs/models.yaml)")
-    parser.add_argument("--llm", default=None, help="LLM preset name (configs/models.yaml)")
-    parser.add_argument("--tts", default=None, help="TTS preset name (configs/models.yaml)")
-    parser.add_argument("--voice", default=None, help="TTS reference voice (configs/voices.yaml)")
+    add_pipeline_args(parser)
     args = parser.parse_args()
 
-    tts_overrides = {}
-    if args.voice:
-        tts_overrides["reference_audio"] = registry.resolve_voice(args.voice)
-
-    pipeline = STSPipeline(
-        asr=registry.build_asr(args.asr),
-        llm=registry.build_llm(args.llm),
-        tts=registry.build_tts(args.tts, **tts_overrides),
-    )
+    pipeline, _presets = build_pipeline_from_args(args)
     result = pipeline.run(args.wav_in, args.wav_out)
 
     print(f"[user]   {result['user_text']}")

@@ -12,14 +12,15 @@ module doesn't add new models, just the plumbing for future ones.
 
 from __future__ import annotations
 
+import typing
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from . import asr, llm, tts
+from .paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
 VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 
@@ -32,37 +33,55 @@ _CLASSES: dict[str, type] = {
     "NobodyTTS": tts.NobodyTTS,
 }
 
-# params keys that hold filesystem paths and should be resolved relative to
-# PROJECT_ROOT rather than passed through as-is.
-_PATH_PARAM_KEYS = {"model_dir", "repo_dir", "reference_audio"}
 
-
-def _load_config() -> dict[str, Any]:
-    with open(CONFIG_PATH, encoding="utf-8") as f:
+def _load_yaml(path: Path) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def _resolve_params(params: dict[str, Any]) -> dict[str, Any]:
-    resolved = dict(params)
-    for key in _PATH_PARAM_KEYS & resolved.keys():
-        resolved[key] = PROJECT_ROOT / resolved[key]
-    return resolved
+def _lookup(mapping: dict[str, Any], key: str, label: str) -> Any:
+    """mapping[key], or a ValueError listing what's actually available.
+
+    Shared by preset lookup (_build) and voice lookup (resolve_voice) so both
+    fail the same way instead of each hand-rolling its own KeyError->ValueError.
+    """
+    try:
+        return mapping[key]
+    except KeyError:
+        available = ", ".join(sorted(mapping))
+        raise ValueError(f"Unknown {label} '{key}'. Available: {available}") from None
+
+
+def _path_field_names(cls: type) -> set[str]:
+    """Constructor params of cls that are typed Path -- these get resolved
+    relative to PROJECT_ROOT. Derived from the dataclass's own annotations
+    (via typing.get_type_hints, which resolves the `from __future__ import
+    annotations` string form back to real types) instead of a hand-maintained
+    set of param names, so a new Path-typed field is picked up automatically
+    instead of silently bypassing resolution until someone remembers to list it.
+    """
+    return {name for name, hint in typing.get_type_hints(cls).items() if hint is Path}
 
 
 def _build(stage: str, preset: str | None, overrides: dict[str, Any] | None = None):
-    config = _load_config()
+    config = _load_yaml(CONFIG_PATH)
     preset = preset or config["defaults"][stage]
-    try:
-        entry = config[stage][preset]
-    except KeyError:
-        available = ", ".join(sorted(config[stage]))
-        raise ValueError(
-            f"Unknown {stage} preset '{preset}'. Available: {available}"
-        ) from None
+    entry = _lookup(config[stage], preset, stage)
 
     cls = _CLASSES[entry["class"]]
-    params = _resolve_params(entry.get("params", {}))
+    params = dict(entry.get("params", {}))
     params.update(overrides or {})
+
+    # Applied to the merged dict (preset params + overrides) so both go
+    # through the same resolution -- previously overrides skipped this
+    # entirely and only worked because callers happened to pre-resolve
+    # (see resolve_voice). Re-resolving an already-absolute Path is a no-op:
+    # PROJECT_ROOT / absolute_path == absolute_path (pathlib joinpath
+    # semantics), so this is safe for both relative yaml values and
+    # already-resolved override values.
+    for key in _path_field_names(cls) & params.keys():
+        params[key] = PROJECT_ROOT / params[key]
+
     return cls(**params)
 
 
@@ -79,7 +98,7 @@ def build_tts(preset: str | None = None, **overrides) -> tts.NobodyTTS:
 
 
 def list_presets(stage: str) -> list[str]:
-    return sorted(_load_config()[stage])
+    return sorted(_load_yaml(CONFIG_PATH)[stage])
 
 
 def default_preset(stage: str) -> str:
@@ -88,14 +107,9 @@ def default_preset(stage: str) -> str:
     NOT list_presets(stage)[0] -- that's alphabetical order and only happens
     to match today because each stage has exactly one preset. Once a stage
     has two, that shortcut silently reports the wrong name to callers that
-    just want to log/display which preset is active (see scripts/talk.py).
+    just want to log/display which preset is active.
     """
-    return _load_config()["defaults"][stage]
-
-
-def _load_voices_config() -> dict[str, Any]:
-    with open(VOICES_CONFIG_PATH, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return _load_yaml(CONFIG_PATH)["defaults"][stage]
 
 
 def resolve_voice(name: str | None = None) -> Path:
@@ -107,13 +121,9 @@ def resolve_voice(name: str | None = None) -> Path:
     than letting NobodyTTS fail deep inside a subprocess call with a less
     obvious error.
     """
-    config = _load_voices_config()
+    config = _load_yaml(VOICES_CONFIG_PATH)
     name = name or config["default"]
-    try:
-        entry = config["voices"][name]
-    except KeyError:
-        available = ", ".join(sorted(config["voices"]))
-        raise ValueError(f"Unknown voice '{name}'. Available: {available}") from None
+    entry = _lookup(config["voices"], name, "voice")
 
     path = PROJECT_ROOT / entry["path"]
     if not path.exists():
@@ -125,4 +135,4 @@ def resolve_voice(name: str | None = None) -> Path:
 
 
 def list_voices() -> list[str]:
-    return sorted(_load_voices_config()["voices"])
+    return sorted(_load_yaml(VOICES_CONFIG_PATH)["voices"])
