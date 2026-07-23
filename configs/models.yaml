@@ -1,0 +1,40 @@
+# Named presets for each pipeline stage, selectable via --asr/--llm/--tts on
+# scripts/run_pipeline.py and scripts/talk.py without touching code.
+#
+# Adding a new candidate model (e.g. from docs/output/ondevice_asr_llm_tts_research_20260716.md):
+#   1. Implement it as a class in src/nobody_flux/{asr,llm,tts}.py with the same
+#      call signature as the existing NobodyASR/NobodyLLM/NobodyTTS (transcribe_file
+#      / reply / synthesize).
+#   2. Add a preset entry below pointing `class` at it and `params` at its
+#      constructor kwargs. Paths in params are resolved relative to the project root.
+#   3. Run with --asr/--llm/--tts <preset-name> to compare against the default.
+#
+# No second ASR/LLM/TTS preset is implemented yet -- this file only wires up
+# the one model per stage the prototype already uses, so the registry has
+# somewhere real to plug future candidates in.
+
+defaults:
+  asr: sense-voice-small
+  llm: qwen3-0.6b
+  tts: moss-tts-nano
+
+asr:
+  sense-voice-small:
+    class: NobodyASR
+    params:
+      model_dir: models/sense-voice
+      use_int8: true
+      language: ko
+
+llm:
+  qwen3-0.6b:
+    class: NobodyLLM
+    params:
+      model_id: Qwen/Qwen3-0.6B
+
+tts:
+  moss-tts-nano:
+    class: NobodyTTS
+    params:
+      repo_dir: external/MOSS-TTS-Nano
+      reference_audio: data/reference_voice_16k.wav

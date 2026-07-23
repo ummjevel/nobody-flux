@@ -1,0 +1,37 @@
+# nobody-flux will be its own git repo (github.com/ummjevel/nobody-flux),
+# separate from the parent `todak` workspace, so it needs its own rules
+# rather than relying on that repo's top-level .gitignore.
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Virtual environments (this project's own, and MOSS-TTS-Nano's isolated one)
+.venv/
+**/.venv/
+
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Large model assets -- fetched by scripts/setup_common.sh, not committed
+models/**/*.onnx
+
+# External repo, cloned by scripts/setup_common.sh, not committed
+external/
+
+# Audio / conversation data (reference voice clip, recorded turns, DB)
+data/*.wav
+data/sessions/
+data/*.db
+data/*.db-journal
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

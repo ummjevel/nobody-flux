@@ -1,0 +1,29 @@
+[project]
+name = "nobody-flux"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "accelerate>=1.14.0",
+    "huggingface-hub<1.0",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.27.0",
+    "pyyaml>=6.0",
+    "sentencepiece>=0.2.2",
+    "sherpa-onnx>=1.13.4",
+    "sounddevice>=0.5.1",
+    "soundfile>=0.14.0",
+    "torch>=2.6.0",
+    "torchaudio>=2.11.0",
+    "torchcodec>=0.15.0",
+    "transformers==4.57.1",
+]
+
+[tool.uv]
+# This project (and MOSS-TTS-Nano's isolated venv under external/) live on a
+# drvfs mount (/mnt/c/...) under WSL2. uv's default hardlink-from-cache install
+# silently drops files on drvfs instead of erroring -- observed firsthand:
+# torch imported fine but crashed on missing libcudnn.so.9/libnccl.so.2 despite
+# their dist-info claiming they were installed. `copy` is slower but correct.
+link-mode = "copy"
