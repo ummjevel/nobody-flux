@@ -20,6 +20,8 @@ __pycache__/
 
 # Large model assets -- fetched by scripts/setup_common.sh, not committed
 models/**/*.onnx
+models/**/*.gguf
+models/**/*.safetensors
 
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/
