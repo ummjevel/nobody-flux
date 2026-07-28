@@ -35,14 +35,21 @@ def main():
     args = parser.parse_args()
 
     pipeline, _presets = build_pipeline_from_args(args)
-    result = pipeline.run(args.wav_in, args.wav_out)
+    try:
+        result = pipeline.run(args.wav_in, args.wav_out)
 
-    print(f"[user]   {result['user_text']}")
-    print(f"[nobody] {result['reply_text']}")
-    print(f"[wav]    {result['wav_out']}")
-    print(
-        f"[timing] asr={result['asr_ms']}ms llm={result['llm_ms']}ms tts={result['tts_ms']}ms"
-    )
+        print(f"[user]   {result['user_text']}")
+        print(f"[nobody] {result['reply_text']}")
+        print(f"[wav]    {result['wav_out']}")
+        print(
+            f"[timing] asr={result['asr_ms']}ms llm={result['llm_ms']}ms tts={result['tts_ms']}ms"
+        )
+    finally:
+        # Server-backed presets (VibeAsrBitnet, FreyaTtsKo) spawn a persistent
+        # subprocess on first use; without this it would linger after this
+        # script exits, still holding GPU/CPU memory. Presets without one
+        # (in-process ASR/LLM, per-call-subprocess TTS) no-op here.
+        pipeline.close()
 
 
 if __name__ == "__main__":

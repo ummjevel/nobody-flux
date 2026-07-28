@@ -92,6 +92,10 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Shut down any server-backed ASR/TTS subprocess (VibeAsrBitnet,
+        # FreyaTtsKo) cleanly on exit -- these stay alive across turns for
+        # speed (that's the whole point), so nothing else stops them.
+        pipeline.close()
         store.end_session(session_id)
         store.close()
         print(f"\nSession {session_id} ended ({turn_index} turns).")

@@ -51,3 +51,14 @@ class STSPipeline:
             "llm_ms": round((t2 - t1) * 1000),
             "tts_ms": round((t3 - t2) * 1000),
         }
+
+    def close(self) -> None:
+        """Release persistent subprocess resources (server-backed ASR/TTS
+        presets like VibeAsrBitnet/FreyaTtsKo). No-op for stages that don't
+        hold one (in-process ASR/LLM, per-call-subprocess TTS) -- callers
+        should call this unconditionally rather than checking which preset
+        is active."""
+        for stage in (self.asr, self.llm, self.tts):
+            close = getattr(stage, "close", None)
+            if close is not None:
+                close()
