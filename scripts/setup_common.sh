@@ -13,6 +13,18 @@
 #      torch==2.7.0 pin would otherwise fight this project's own torch pin
 #      the moment both share one venv -- this happened once during
 #      development and silently broke both)
+#   5. clone+build microsoft/VibeASR.cpp into external/ if missing (second ASR
+#      candidate, see src/nobody_flux/asr.py's VibeAsrBitnet docstring) and
+#      download its two GGUF model files
+#
+# NOTE on WSL2/drvfs (/mnt/c/...) checkouts: both external/ clones above
+# involve either heavy Python package imports (MOSS-TTS-Nano) or a multi-file
+# C++ compile (VibeASR.cpp), and both get noticeably slower on a drvfs mount
+# (per-file I/O overhead) than on a native Linux filesystem. If you're on
+# WSL2 and hit this, consider cloning to somewhere under your Linux home
+# (e.g. ~/dev/VibeASR.cpp) and symlinking it into external/ instead --
+# confirmed to cut MOSS-TTS-Nano's per-call `import torch` from ~46s to ~25s
+# this way. Not automated here since it only matters for drvfs.
 #
 # Both steps that call `uv sync`/`uv pip install` force UV_LINK_MODE=copy:
 # this repo has been run from a drvfs mount (WSL2, /mnt/c/...) where uv's
@@ -27,10 +39,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/4: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/5: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/4: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/5: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -43,7 +55,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/4: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/5: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -57,7 +69,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/4: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/5: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -84,5 +96,65 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "NOTE: no data/reference_voice_16k.wav -- TTS voice_clone mode needs a"
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
+
+echo "== [$TARGET_LABEL] 5/5: VibeASR.cpp (ASR candidate, compiled binary) =="
+VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
+if [ ! -d "$VIBEASR_DIR" ]; then
+    echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
+    mkdir -p "$PROJECT_ROOT/external"
+    git clone --recursive --depth 1 https://github.com/microsoft/VibeASR.cpp.git "$VIBEASR_DIR"
+else
+    echo "Already present at $VIBEASR_DIR, skipping clone."
+fi
+
+# Two local fixes on top of upstream, see patches/vibeasr-cpp-wsl2-fixes.patch
+# for the full diff+rationale in one place:
+#   1. src/vae.cpp hardcodes a 128GB ggml compute context on non-Windows
+#      (assumes Linux memory overcommit); ENOMEMs via posix_memalign on any
+#      box whose RAM+swap is under 128GB -- patched down to 8GB.
+#   2. src/asr_server.cpp runs the VAE's acoustic and semantic encode passes
+#      sequentially even though they're independent (~90% of a warm request's
+#      latency); patched to run them concurrently on two threads instead
+#      (~15-20% faster, see src/nobody_flux/asr.py's VibeAsrBitnet docstring).
+# `git apply --check` first so re-running setup on an already-patched clone
+# is a no-op instead of an error (git apply isn't idempotent on its own).
+VIBEASR_PATCH="$PROJECT_ROOT/patches/vibeasr-cpp-wsl2-fixes.patch"
+if (cd "$VIBEASR_DIR" && git apply --check "$VIBEASR_PATCH" 2>/dev/null); then
+    echo "Applying local fixes (memory size + concurrent VAE encode)..."
+    (cd "$VIBEASR_DIR" && git apply "$VIBEASR_PATCH")
+else
+    echo "Local fixes already applied (or don't cleanly apply -- check by hand"
+    echo "if this is a fresh clone), skipping."
+fi
+
+# Two binaries: asr_infer (one-shot CLI, reloads models every call -- used
+# for quick manual testing) and asr_stream_server (persistent process, loads
+# once then answers many requests over stdin/stdout -- what VibeAsrBitnet
+# actually uses at runtime, see its docstring). Build both.
+if [ ! -x "$VIBEASR_DIR/build/bin/asr_infer" ] || [ ! -x "$VIBEASR_DIR/build/bin/asr_stream_server" ]; then
+    echo "Building asr_infer + asr_stream_server (cmake + gcc/clang required)..."
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "ERROR: cmake not found. Install it (apt install cmake, or"
+        echo "'pip install --user cmake' inside a venv if you lack sudo) and re-run."
+        exit 1
+    fi
+    (cd "$VIBEASR_DIR" && cmake -B build -DCMAKE_BUILD_TYPE=Release \
+        && cmake --build build --target asr_infer -j"$(nproc)" \
+        && cmake --build build --target asr_stream_server -j"$(nproc)")
+else
+    echo "asr_infer + asr_stream_server already built, skipping."
+fi
+
+VIBEASR_MODELS_DIR="$PROJECT_ROOT/models/vibeasr"
+mkdir -p "$VIBEASR_MODELS_DIR"
+for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
+    if [ ! -f "$VIBEASR_MODELS_DIR/$f" ]; then
+        echo "Downloading $f..."
+        curl -L -o "$VIBEASR_MODELS_DIR/$f" \
+            "https://huggingface.co/microsoft/VibeVoice-ASR-BitNet/resolve/main/$f"
+    else
+        echo "$f already present, skipping."
+    fi
+done
 
 echo "== [$TARGET_LABEL] setup complete =="

@@ -29,6 +29,7 @@ VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 # malicious class name in the yaml can't reach for something unrelated.
 _CLASSES: dict[str, type] = {
     "NobodyASR": asr.NobodyASR,
+    "VibeAsrBitnet": asr.VibeAsrBitnet,
     "NobodyLLM": llm.NobodyLLM,
     "NobodyTTS": tts.NobodyTTS,
 }

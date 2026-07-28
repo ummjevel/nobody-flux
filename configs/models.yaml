@@ -9,10 +9,6 @@
 #      constructor kwargs. Paths in params are resolved relative to the project root.
 #   3. Run with --asr/--llm/--tts <preset-name> to compare against the default.
 #
-# No second ASR/LLM/TTS preset is implemented yet -- this file only wires up
-# the one model per stage the prototype already uses, so the registry has
-# somewhere real to plug future candidates in.
-
 defaults:
   asr: sense-voice-small
   llm: qwen3-0.6b
@@ -25,6 +21,17 @@ asr:
       model_dir: models/sense-voice
       use_int8: true
       language: ko
+
+  # Second candidate, added for comparison -- see src/nobody_flux/asr.py's
+  # VibeAsrBitnet docstring (microsoft/VibeVoice-ASR-BitNet via VibeASR.cpp,
+  # CPU-only, ARM-relevant for the CM4 target). Needs a compiled asr_infer
+  # binary + downloaded GGUF weights, see scripts/setup_common.sh step 5.
+  vibeasr-bitnet:
+    class: VibeAsrBitnet
+    params:
+      repo_dir: external/VibeASR.cpp
+      vae_model: models/vibeasr/vibeasr-vae-encoder-i8_s.gguf
+      lm_model: models/vibeasr/vibeasr-lm-i2_s-embed-q6_k.gguf
 
 llm:
   qwen3-0.6b:

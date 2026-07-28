@@ -1,0 +1,165 @@
+diff --git a/src/asr_server.cpp b/src/asr_server.cpp
+index 0e19ae6..0d7fff8 100644
+--- a/src/asr_server.cpp
++++ b/src/asr_server.cpp
+@@ -19,6 +19,8 @@
+ 
+ #include "time_compat.h"
+ 
++#include <thread>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdio>
+@@ -135,6 +137,7 @@ static int process_chunk(
+     const std::string & audio_path,
+     const server_params & params,
+     vae_context_t * vae_ctx,
++    vae_context_t * vae_ctx_semantic,
+     vae_model_t * vae_model,
+     llama_model * lm_model,
+     llama_context * lm_ctx) {
+@@ -154,12 +157,52 @@ static int process_chunk(
+     int32_t n_samples = (int32_t)audio.samples.size();
+     int32_t expected_frames = (n_samples + params.compress_ratio - 1) / params.compress_ratio;
+ 
+-    // VAE Acoustic Encode
++    // VAE Acoustic + Semantic Encode, run concurrently.
++    //
++    // These are two independent forward passes over the SAME audio (one
++    // encoder produces "what it sounds like" features, the other "what it
++    // means" features -- see vae_model's acoustic_encoder/semantic_encoder).
++    // Neither depends on the other's output, so there's no reason to pay
++    // for them one after another: on this dev box they were ~1.05s each
++    // when run sequentially (measured), i.e. ~90% of a warm ASR request's
++    // total latency, for two calls that don't need each other's results.
++    //
++    // Safety: each thread gets its OWN vae_context_t (vae_ctx / this
++    // process's persistent context, and vae_ctx_semantic, created alongside
++    // it in main() from the same vae_model). vae_encode_impl() (vae.cpp)
++    // frees and reallocates ctx->compute_ctx on every call -- sharing one
++    // vae_context_t between these two threads would race on that. The
++    // vae_model itself (weights) is read-only during inference, so sharing
++    // *that* across both contexts is fine.
++    //
++    // Measured result: ~1.8s combined (was ~2.1s sequential) -- real, but
++    // well short of the naive ~1.05s (i.e. max() instead of sum()) you'd
++    // hope for from two independent, non-competing threads. Thread-count
++    // sweeps (6/8/12/16 threads per context) all landed in the same
++    // 1.7-1.95s band, so it isn't an undertuned thread count either --
++    // something else (memory bandwidth contention between the two
++    // concurrent compute graphs, most likely, given both are matmul-heavy
++    // over the same-sized audio) caps the win here. Still a real ~15-20%
++    // cut for zero quality cost, just not the 2x this comment used to imply.
+     std::vector<float> acoustic_features(expected_frames * acoustic_dim);
++    std::vector<float> semantic_features(expected_frames * semantic_dim);
+     float acoustic_time_ms = 0.0f;
+-    int32_t acoustic_frames = vae_encode_acoustic_with_timing(
+-        vae_ctx, audio.samples.data(), n_samples,
+-        acoustic_features.data(), &acoustic_time_ms);
++    float semantic_time_ms = 0.0f;
++    int32_t acoustic_frames = 0;
++    int32_t semantic_frames = 0;
++
++    std::thread acoustic_thread([&]() {
++        acoustic_frames = vae_encode_acoustic_with_timing(
++            vae_ctx, audio.samples.data(), n_samples,
++            acoustic_features.data(), &acoustic_time_ms);
++    });
++    std::thread semantic_thread([&]() {
++        semantic_frames = vae_encode_semantic_with_timing(
++            vae_ctx_semantic, audio.samples.data(), n_samples,
++            semantic_features.data(), &semantic_time_ms);
++    });
++    acoustic_thread.join();
++    semantic_thread.join();
+ 
+     if (acoustic_frames < 0) {
+         fprintf(stdout, "[ERROR] VAE acoustic encoding failed\n---END---\n");
+@@ -168,13 +211,6 @@ static int process_chunk(
+     }
+     acoustic_features.resize(acoustic_frames * acoustic_dim);
+ 
+-    // VAE Semantic Encode
+-    std::vector<float> semantic_features(expected_frames * semantic_dim);
+-    float semantic_time_ms = 0.0f;
+-    int32_t semantic_frames = vae_encode_semantic_with_timing(
+-        vae_ctx, audio.samples.data(), n_samples,
+-        semantic_features.data(), &semantic_time_ms);
+-
+     if (semantic_frames < 0) {
+         fprintf(stdout, "[ERROR] VAE semantic encoding failed\n---END---\n");
+         fflush(stdout);
+@@ -347,7 +383,7 @@ int main(int argc, char ** argv) {
+     }
+ 
+     struct vae_context_params vae_cparams = vae_context_default_params();
+-    vae_cparams.n_threads = params.n_threads;
++    vae_cparams.n_threads = params.n_threads;  // each concurrent context gets the full thread count
+ 
+     vae_context_t * vae_ctx = vae_new_context_with_model(vae_model, vae_cparams);
+     if (!vae_ctx) {
+@@ -356,6 +392,17 @@ int main(int argc, char ** argv) {
+         return 1;
+     }
+ 
++    // Second context, same model, for the semantic encode to run on
++    // concurrently with the acoustic encode above instead of after it --
++    // see process_chunk()'s comment.
++    vae_context_t * vae_ctx_semantic = vae_new_context_with_model(vae_model, vae_cparams);
++    if (!vae_ctx_semantic) {
++        fprintf(stderr, "Error: Failed to create second VAE context\n");
++        vae_free(vae_ctx);
++        vae_free_model(vae_model);
++        return 1;
++    }
++
+     // Load LM model
+     fprintf(stderr, "[Init] Loading LM model...\n");
+ 
+@@ -373,6 +420,7 @@ int main(int argc, char ** argv) {
+     if (!lm_model) {
+         fprintf(stderr, "Error: Failed to load LM model\n");
+         vae_free(vae_ctx);
++        vae_free(vae_ctx_semantic);
+         vae_free_model(vae_model);
+         return 1;
+     }
+@@ -388,6 +436,7 @@ int main(int argc, char ** argv) {
+         fprintf(stderr, "Error: Failed to create LM context\n");
+         llama_free_model(lm_model);
+         vae_free(vae_ctx);
++        vae_free(vae_ctx_semantic);
+         vae_free_model(vae_model);
+         return 1;
+     }
+@@ -435,7 +484,7 @@ int main(int argc, char ** argv) {
+ 
+         chunk_count++;
+         fprintf(stderr, "[Server] Chunk %d: %s\n", chunk_count, input.c_str());
+-        process_chunk(input, params, vae_ctx, vae_model, lm_model, lm_ctx);
++        process_chunk(input, params, vae_ctx, vae_ctx_semantic, vae_model, lm_model, lm_ctx);
+     }
+ 
+     // Cleanup
+@@ -444,6 +493,7 @@ int main(int argc, char ** argv) {
+     llama_free_model(lm_model);
+     llama_backend_free();
+     vae_free(vae_ctx);
++    vae_free(vae_ctx_semantic);
+     vae_free_model(vae_model);
+ 
+     return 0;
+diff --git a/src/vae.cpp b/src/vae.cpp
+index a89307b..9aaf3a5 100644
+--- a/src/vae.cpp
++++ b/src/vae.cpp
+@@ -653,7 +653,7 @@ static int32_t vae_encode_impl(
+     // 6 GB is ample for the VAE intermediate tensors at typical audio lengths.
+     const size_t vae_ctx_mem_size = (size_t)6 * 1024 * 1024 * 1024;
+ #else
+-    const size_t vae_ctx_mem_size = (size_t)128 * 1024 * 1024 * 1024;
++    const size_t vae_ctx_mem_size = (size_t)8 * 1024 * 1024 * 1024;  // patched: 128GB overcommits past WSL2 RAM+swap (80GB), posix_memalign ENOMEMs
+ #endif
+     struct ggml_init_params ctx_params = {
+         /*.mem_size   =*/ vae_ctx_mem_size,
