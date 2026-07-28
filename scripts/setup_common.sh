@@ -16,6 +16,11 @@
 #   5. clone+build microsoft/VibeASR.cpp into external/ if missing (second ASR
 #      candidate, see src/nobody_flux/asr.py's VibeAsrBitnet docstring) and
 #      download its two GGUF model files
+#   6. set up FreyaTTS's own isolated venv if missing (second TTS candidate,
+#      see src/nobody_flux/tts.py's FreyaTtsKo docstring) -- NOTE: the
+#      models/freyatts-ko-voiceA/ checkpoint itself is NOT fetched here, it
+#      comes from the sibling voice-announce-mcp project and isn't published
+#      anywhere this script could download from yet; copy it in by hand
 #
 # NOTE on WSL2/drvfs (/mnt/c/...) checkouts: both external/ clones above
 # involve either heavy Python package imports (MOSS-TTS-Nano) or a multi-file
@@ -39,10 +44,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/5: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/6: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/5: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/6: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -55,7 +60,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/5: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/6: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -69,7 +74,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/5: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/6: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -97,7 +102,7 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
 
-echo "== [$TARGET_LABEL] 5/5: VibeASR.cpp (ASR candidate, compiled binary) =="
+echo "== [$TARGET_LABEL] 5/6: VibeASR.cpp (ASR candidate, compiled binary) =="
 VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
 if [ ! -d "$VIBEASR_DIR" ]; then
     echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
@@ -156,5 +161,25 @@ for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
         echo "$f already present, skipping."
     fi
 done
+
+echo "== [$TARGET_LABEL] 6/6: FreyaTTS (external, isolated venv) =="
+FREYATTS_VENV_DIR="$PROJECT_ROOT/external/freyatts-venv"
+if [ ! -x "$FREYATTS_VENV_DIR/bin/python" ]; then
+    echo "Creating FreyaTTS's own venv (kept separate -- freyatts's own torch"
+    echo "resolution shouldn't have to reconcile with this project's or"
+    echo "MOSS-TTS-Nano's pins; see src/nobody_flux/tts.py's FreyaTtsKo docstring)..."
+    uv venv --python 3.11 "$FREYATTS_VENV_DIR"
+    uv pip install --python "$FREYATTS_VENV_DIR/bin/python" \
+        'freyatts @ git+https://github.com/ummjevel/FreyaTTS.git' soundfile
+else
+    echo "FreyaTTS venv already set up, skipping."
+fi
+
+if [ ! -f "$PROJECT_ROOT/models/freyatts-ko-voiceA/model.safetensors" ]; then
+    echo "NOTE: no models/freyatts-ko-voiceA/ checkpoint -- not published/downloadable"
+    echo "yet, copy config.json + model.safetensors in by hand (e.g. from the"
+    echo "sibling voice-announce-mcp project's models/freyatts-ko-voiceA/) to use"
+    echo "the freyatts-ko-voicea TTS preset."
+fi
 
 echo "== [$TARGET_LABEL] setup complete =="

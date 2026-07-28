@@ -1,0 +1,8 @@
+{
+  "vocab": 127,
+  "d": 768,
+  "depth": 22,
+  "heads": 12,
+  "ff": 2048,
+  "arch": "xattn"
+}

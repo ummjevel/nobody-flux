@@ -17,13 +17,18 @@
 - `configs/models.yaml`에 스테이지별(asr/llm/tts) 프리셋을 등록. `src/nobody_flux/registry.py`가
   로드/생성.
 - `scripts/run_pipeline.py`, `scripts/talk.py` 둘 다 `--asr/--llm/--tts <preset>`으로 선택 가능.
-- LLM/TTS는 아직 스테이지당 프리셋 1개씩뿐. ASR은 두 번째 프리셋이 붙음:
-  `vibeasr-bitnet` (microsoft/VibeVoice-ASR-BitNet, arXiv:2607.21075 — CPU-only
-  ggml/BitNet, ARM NEON 커널 포함해 CM4 타깃과 직결. `src/nobody_flux/asr.py`의
-  `VibeAsrBitnet` 참고). 같은 테스트 wav에서 `sense-voice-small`의 어절 중간
-  스페이스 문제가 없음 — `--asr vibeasr-bitnet`으로 바로 비교 가능. 매 턴 모델을
-  재로딩하는 대신 상주 서버 프로세스(`asr_stream_server`)로 돌아가서 웜 상태에서
-  ~2초대.
+- LLM은 아직 스테이지당 프리셋 1개뿐. ASR/TTS는 두 번째 프리셋이 붙음:
+  - ASR: `vibeasr-bitnet` (microsoft/VibeVoice-ASR-BitNet, arXiv:2607.21075 — CPU-only
+    ggml/BitNet, ARM NEON 커널 포함해 CM4 타깃과 직결. `src/nobody_flux/asr.py`의
+    `VibeAsrBitnet` 참고). 같은 테스트 wav에서 `sense-voice-small`의 어절 중간
+    스페이스 문제가 없음 — `--asr vibeasr-bitnet`으로 바로 비교 가능. 매 턴 모델을
+    재로딩하는 대신 상주 서버 프로세스(`asr_stream_server`)로 돌아가서 웜 상태에서
+    ~2초대.
+  - TTS: `freyatts-ko-voicea` (**기본값**. FreyaTTS 한국어 voiceA 체크포인트,
+    voice-announce-mcp 프로젝트에서 가져옴. `src/nobody_flux/tts.py`의 `FreyaTtsKo`
+    참고). `moss-tts-nano`와 달리 torch 버전을 고정하지 않아 CUDA(sm_120)가 실제로
+    동작 — MOSS-TTS-Nano의 CPU 전용 50~96초 대비 웜 상태에서 ~1초대. 마찬가지로
+    상주 서버 프로세스(`scripts/_freyatts_server.py`)로 돎.
 - 그 외 후보 모델(Vosk, Gemma 4 E2B, Kokoro-82M 등)은 아직 구현 안 됨.
 
 ### 대화 경험
@@ -51,8 +56,8 @@
 - **웨이크워드 / 풀 스트리밍 ASR**: `vad.py`는 발화 단위 녹음→일괄 ASR이지, 실시간 스트리밍
   전사가 아님.
 - **끼어들기(barge-in)**: TTS 재생 중엔 녹음 안 함. 사람이 응답 중간에 끼어들 수 없음.
-- **다른 후보 모델의 실제 구현**: ASR은 두 번째 프리셋(`vibeasr-bitnet`)이 붙었지만, LLM/TTS는
-  여전히 레지스트리 인프라만 있고 두 번째 구현은 없음.
+- **다른 후보 모델의 실제 구현**: ASR(`vibeasr-bitnet`)과 TTS(`freyatts-ko-voicea`)는 두 번째
+  프리셋이 붙었지만, LLM은 여전히 레지스트리 인프라만 있고 두 번째 구현은 없음.
 - **여러 프리셋 자동 비교 벤치마크 스크립트**: `turns` 테이블에 필요한 데이터(프리셋, ms)는
   이미 쌓이므로, 이 데이터를 모아 표로 뽑는 스크립트를 추가하면 됨 — 아직 없음.
 - **기억 추출 로직**: 스키마만 있고 실제로 뽑아서 채우는 코드 없음.

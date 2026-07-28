@@ -80,7 +80,8 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
 ASR/LLM/TTS 프리셋은 `configs/models.yaml`, 목소리는 `configs/voices.yaml`에 등록돼 있다
 (목소리는 별도 프리셋 축이 아니라 TTS 스테이지의 파라미터 하나라 따로 관리됨). ASR은
 `sense-voice-small`/`vibeasr-bitnet` 두 프리셋이 있고(`--asr vibeasr-bitnet`으로 전환),
-LLM/TTS는 아직 1개씩뿐이지만 새 후보 모델을 붙이는 구조는 갖춰져 있다 — 자세한 절차는
+TTS도 `moss-tts-nano`/`freyatts-ko-voicea` 두 프리셋이 있다(기본값은 `freyatts-ko-voicea`).
+LLM은 아직 1개뿐이지만 새 후보 모델을 붙이는 구조는 갖춰져 있다 — 자세한 절차는
 `docs/FEATURES.md`의 "프리셋 추가하는 법" 참고.
 
 ### 4. 대화 기록 확인

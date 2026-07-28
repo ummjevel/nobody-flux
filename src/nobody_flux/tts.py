@@ -36,12 +36,14 @@ again, since it isn't a declared dependency here).
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._procio import LineReader, StderrDrainer, clean_subprocess_env
 from .paths import PROJECT_ROOT
 
 MOSS_TTS_NANO_REPO = PROJECT_ROOT / "external" / "MOSS-TTS-Nano"
@@ -107,3 +109,147 @@ class NobodyTTS:
         if result.returncode != 0:
             raise RuntimeError(f"MOSS-TTS-Nano failed:\n{result.stderr[-2000:]}")
         return out_path
+
+
+FREYATTS_VENV_DIR = PROJECT_ROOT / "external" / "freyatts-venv"
+DEFAULT_FREYATTS_MODEL_DIR = PROJECT_ROOT / "models" / "freyatts-ko-voiceA"
+FREYATTS_SERVER_SCRIPT = PROJECT_ROOT / "scripts" / "_freyatts_server.py"
+
+
+@dataclass
+class FreyaTtsKo:
+    """Second TTS candidate: FreyaTTS (github.com/ummjevel/FreyaTTS), a Korean
+    fork distilled from Qwen3-TTS, checkpoint "voiceA" (from a sibling project,
+    voice-announce-mcp -- see its models/freyatts-ko-voiceA/, copied into this
+    project's models/ dir). Flow-matching DiT + frozen VoxCPM2 AudioVAE; no
+    speaker embedding -- the noise seed *is* the voice (seed 9 = voiceA, per
+    that project's confirmed_voices/best_seeds.json).
+
+    Unlike MOSS-TTS-Nano, this doesn't pin an exact torch version (just
+    "torch" in its deps), so its isolated venv resolved torch==2.13.0+cu130 --
+    which DOES have sm_120 (RTX 5090/Blackwell) kernels, unlike MOSS-TTS-Nano's
+    forced torch==2.7.0+cu126. CUDA actually works here.
+
+    Backed by scripts/_freyatts_server.py, a persistent process (in FreyaTTS's
+    own isolated venv) that loads the model once via FreyaTTS.from_pretrained
+    and then answers requests over stdin/stdout (JSON lines in, JSON lines
+    out -- see that script's header comment). Started lazily on first
+    synthesize() call, reused across calls, and must be shut down via close()
+    (STSPipeline.close() does this) -- otherwise it lingers as an orphaned
+    process holding GPU memory. This cut per-turn latency from ~7.4s (previous
+    per-call subprocess, reloading the model + re-fetching the VoxCPM2 AudioVAE
+    every time) to ~0.7-1.4s after the one-time ~5.7s startup cost.
+
+    Setup (see scripts/setup_common.sh step 6): `uv venv --python 3.11
+    external/freyatts-venv && uv pip install --python
+    external/freyatts-venv/bin/python 'freyatts @
+    git+https://github.com/ummjevel/FreyaTTS.git' soundfile` (freyatts is a
+    normal pip package, no repo clone needed -- simpler setup than
+    MOSS-TTS-Nano's).
+    """
+
+    venv_dir: Path = FREYATTS_VENV_DIR
+    model_dir: Path = DEFAULT_FREYATTS_MODEL_DIR
+    device: str = "cuda"
+    steps: int = 32
+    seed: int = 9
+    # from_pretrained() also fetches the frozen VoxCPM2 AudioVAE from HF on
+    # first use (cached after); budget for that plus a cold model load. Only
+    # paid once (server startup), not per request.
+    startup_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 60.0
+
+    def __post_init__(self):
+        self._proc: subprocess.Popen | None = None
+        self._stdout_reader: LineReader | None = None
+        self._stderr_drainer: StderrDrainer | None = None
+
+    def _interpreter(self) -> str:
+        venv_python = self.venv_dir / "bin" / "python"
+        if not venv_python.exists():
+            raise FileNotFoundError(
+                f"No freyatts venv at {venv_python}. Create it with "
+                "`uv venv --python 3.11 external/freyatts-venv && uv pip install "
+                "--python external/freyatts-venv/bin/python "
+                "'freyatts @ git+https://github.com/ummjevel/FreyaTTS.git' soundfile` "
+                "(see src/nobody_flux/tts.py's FreyaTtsKo docstring)."
+            )
+        return str(venv_python)
+
+    def _ensure_started(self) -> subprocess.Popen:
+        if self._proc is not None and self._proc.poll() is None:
+            return self._proc
+
+        self._proc = subprocess.Popen(
+            [
+                self._interpreter(),
+                str(FREYATTS_SERVER_SCRIPT),
+                "--model-dir",
+                str(self.model_dir),
+                "--device",
+                self.device,
+                "--steps",
+                str(self.steps),
+                "--seed",
+                str(self.seed),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            # bufsize=1: line-buffer *our* end of the pipes (Python-side);
+            # scripts/_freyatts_server.py flushes explicitly after every
+            # line it writes, so this is enough to see each response promptly.
+            bufsize=1,
+            # General hygiene, see clean_subprocess_env()'s docstring -- not
+            # the fix for the deadlock avoided below by StderrDrainer.
+            env=clean_subprocess_env(),
+        )
+        # Both readers MUST start immediately, before the first get_line()
+        # call below -- see LineReader/StderrDrainer's docstrings in
+        # _procio.py for the two different (and differently-shaped) hangs
+        # this avoids.
+        self._stdout_reader = LineReader(self._proc.stdout)
+        self._stderr_drainer = StderrDrainer(self._proc.stderr)
+
+        try:
+            ready = self._stdout_reader.get_line(self.startup_timeout_seconds)
+        except TimeoutError as exc:
+            self._proc.kill()
+            raise RuntimeError(f"freyatts server didn't start in time: {exc}") from exc
+        if ready.strip() != "---READY---":
+            self._proc.kill()
+            raise RuntimeError(
+                f"freyatts server failed to start ({ready!r}):\n{self._stderr_drainer.tail()[-2000:]}"
+            )
+        return self._proc
+
+    def synthesize(self, text: str, out_path: str) -> str:
+        """Synthesize `text` (Korean) to a 48kHz mono wav at `out_path`."""
+        proc = self._ensure_started()
+        proc.stdin.write(json.dumps({"text": text, "out": out_path}) + "\n")
+        proc.stdin.flush()
+
+        try:
+            line = self._stdout_reader.get_line(self.request_timeout_seconds)
+        except TimeoutError as exc:
+            raise RuntimeError(f"freyatts server request timed out: {exc}") from exc
+        if not line:
+            raise RuntimeError(
+                f"freyatts server exited unexpectedly:\n{self._stderr_drainer.tail()[-2000:]}"
+            )
+
+        response = json.loads(line)
+        if not response.get("ok"):
+            raise RuntimeError(f"freyatts server: {response.get('error')}")
+        return out_path
+
+    def close(self) -> None:
+        if self._proc is None or self._proc.poll() is not None:
+            return
+        try:
+            self._proc.stdin.write(json.dumps({"cmd": "exit"}) + "\n")
+            self._proc.stdin.flush()
+            self._proc.wait(timeout=5)
+        except Exception:
+            self._proc.kill()

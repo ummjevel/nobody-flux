@@ -12,7 +12,7 @@
 defaults:
   asr: sense-voice-small
   llm: qwen3-0.6b
-  tts: moss-tts-nano
+  tts: freyatts-ko-voicea
 
 asr:
   sense-voice-small:
@@ -51,3 +51,20 @@ tts:
       # that torch build's kernels actually match (e.g. H100/sm_90), add a
       # moss-tts-nano-cuda preset with device: cuda rather than editing this one.
       device: cpu
+
+  # Second candidate, added for comparison -- see src/nobody_flux/tts.py's
+  # FreyaTtsKo docstring. Its isolated venv resolved an untethered torch
+  # version that DOES have sm_120 kernels, so device: cuda actually works
+  # here (~7.4s vs moss-tts-nano's 50-96s CPU-only). Needs
+  # external/freyatts-venv set up (see docstring) and models/freyatts-ko-voiceA/
+  # (config.json + model.safetensors, copied from the voice-announce-mcp
+  # sibling project -- the .safetensors is gitignored, same as ASR/other TTS
+  # weights).
+  freyatts-ko-voicea:
+    class: FreyaTtsKo
+    params:
+      venv_dir: external/freyatts-venv
+      model_dir: models/freyatts-ko-voiceA
+      device: cuda
+      steps: 32
+      seed: 9
