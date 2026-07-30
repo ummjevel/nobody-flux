@@ -12,7 +12,7 @@
 defaults:
   asr: sense-voice-small
   llm: qwen3-0.6b
-  tts: freyatts-ko-voicea
+  tts: sherpa-matcha-ko
 
 asr:
   sense-voice-small:
@@ -68,3 +68,35 @@ tts:
       device: cuda
       steps: 32
       seed: 9
+
+  # Third candidate, sherpa-onnx's own Matcha-TTS support -- see
+  # src/nobody_flux/tts.py's SherpaMatchaTts docstring. k2-fsa itself only
+  # ships English (en_US-ljspeech) and Chinese (zh-baker) checkpoints; this
+  # is the English one, kept around for comparing sherpa-onnx's own TTS
+  # runtime characteristics (not Korean -- see sherpa-matcha-ko below for
+  # that). No isolated venv needed (in-process, same sherpa_onnx dependency
+  # as sense-voice-small's ASR).
+  sherpa-matcha-en:
+    class: SherpaMatchaTts
+    params: {}  # every field already defaults to the English checkpoint
+
+  # DEFAULT. Same runtime as sherpa-matcha-en above, but with a
+  # community/custom-trained Korean acoustic model (models/shepa-matcha-ko/,
+  # not from k2-fsa) swapped in -- see SherpaMatchaTts's docstring for why it
+  # can reuse the English preset's vocoder/tokens/data_dir despite living in
+  # a different directory. CPU-only (see the class's `provider` field);
+  # picked as the project default for exactly that reason -- no isolated
+  # venv, no GPU dependency, matches the eventual CM4 (no-GPU) target better
+  # than freyatts-ko-voicea/moss-tts-nano.
+  sherpa-matcha-ko:
+    class: SherpaMatchaTts
+    params:
+      acoustic_model: models/shepa-matcha-ko/matcha-ko-voiceA-ep499-steps10.onnx
+      # Model-specific tokens.txt + vocoder now live alongside the acoustic
+      # model itself (not reused from sherpa-matcha-en/ anymore) -- only
+      # data_dir (espeak-ng-data) is still shared, since that's a
+      # multi-language phoneme dictionary package, not something that needs
+      # to be per-model.
+      vocoder: models/shepa-matcha-ko/vocos-22khz-univ.onnx
+      tokens: models/shepa-matcha-ko/tokens.txt
+      data_dir: models/sherpa-matcha-en/espeak-ng-data
