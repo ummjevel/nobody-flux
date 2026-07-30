@@ -33,6 +33,7 @@ _CLASSES: dict[str, type] = {
     "NobodyASR": asr.NobodyASR,
     "VibeAsrBitnet": asr.VibeAsrBitnet,
     "NobodyLLM": llm.NobodyLLM,
+    "NobodyLLMGguf": llm.NobodyLLMGguf,
     "NobodyTTS": tts.NobodyTTS,
     "FreyaTtsKo": tts.FreyaTtsKo,
     "SherpaMatchaTts": tts.SherpaMatchaTts,

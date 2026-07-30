@@ -11,7 +11,7 @@
 #
 defaults:
   asr: sense-voice-small
-  llm: qwen3-0.6b
+  llm: qwen3-0.6b-gguf
   tts: sherpa-matcha-ko
 
 asr:
@@ -38,6 +38,16 @@ llm:
     class: NobodyLLM
     params:
       model_id: Qwen/Qwen3-0.6B
+
+  # Second candidate: same Qwen3-0.6B weights, GGUF Q4_K_M quantization run
+  # through llama-cpp-python instead of raw transformers -- see
+  # src/nobody_flux/llm.py's NobodyLLMGguf docstring. Confirmed by hand
+  # ~2-2.5x faster per turn on CPU than qwen3-0.6b above (same model, same
+  # license, only the runtime differs). Needs models/qwen3-0.6b-gguf/ (see
+  # scripts/setup_common.sh) and llama-cpp-python (pyproject.toml).
+  qwen3-0.6b-gguf:
+    class: NobodyLLMGguf
+    params: {}  # every field already defaults to the right paths/model
 
   # Second candidate, added for comparison -- see docs/output/
   # ondevice_asr_llm_tts_research_20260716.md's LLM section update.
