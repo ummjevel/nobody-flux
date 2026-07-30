@@ -1,7 +1,7 @@
 # nobody-flux
 
 온디바이스 ASR → LLM → TTS 파이프라인 프로토타입. 목표는 클라우드 STS(Gemini Live/OpenAI
-Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파트너("루카스")를 만드는 것.
+Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파트너("퀜")를 만드는 것.
 지금은 GPU가 있는 개발 머신(RTX 5090 로컬 / H100 서버)에서 파이프라인 구조와 모델 선택을
 검증하는 단계고, 최종 타깃은 CM4급 저사양 온디바이스 하드웨어.
 
@@ -95,7 +95,7 @@ sqlite3 data/conversations.db "SELECT turn_index, user_text, reply_text, asr_ms,
 ```
 src/nobody_flux/
   asr.py, llm.py, tts.py   # 각 스테이지 구현 (NobodyASR/NobodyLLM/NobodyTTS)
-  persona.py               # 시스템 프롬프트 ("루카스" 페르소나)
+  persona.py               # 시스템 프롬프트 ("퀜" 페르소나)
   pipeline.py               # ASR→LLM→TTS 오케스트레이션 + 스테이지별 소요시간 계측
   registry.py               # configs/{models,voices}.yaml → 프리셋/음성 인스턴스 생성
   vad.py                    # 에너지 기반 발화 구간 검출
