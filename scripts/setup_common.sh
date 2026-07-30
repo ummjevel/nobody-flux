@@ -25,6 +25,8 @@
 #      see src/nobody_flux/tts.py's SherpaMatchaTts docstring -- no Korean
 #      checkpoint exists upstream, this is for comparing sherpa-onnx's own
 #      TTS runtime, not for the Korean pipeline)
+#   8. download the TEN-VAD onnx model (src/nobody_flux/vad.py's
+#      VoiceActivityDetector -- also via sherpa_onnx, no separate venv)
 #
 # NOTE on WSL2/drvfs (/mnt/c/...) checkouts: both external/ clones above
 # involve either heavy Python package imports (MOSS-TTS-Nano) or a multi-file
@@ -48,10 +50,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/7: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/8: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/7: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/8: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -64,7 +66,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/7: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/8: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -78,7 +80,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/7: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/8: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -106,7 +108,7 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
 
-echo "== [$TARGET_LABEL] 5/7: VibeASR.cpp (ASR candidate, compiled binary) =="
+echo "== [$TARGET_LABEL] 5/8: VibeASR.cpp (ASR candidate, compiled binary) =="
 VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
 if [ ! -d "$VIBEASR_DIR" ]; then
     echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
@@ -166,7 +168,7 @@ for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
     fi
 done
 
-echo "== [$TARGET_LABEL] 6/7: FreyaTTS (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 6/8: FreyaTTS (external, isolated venv) =="
 FREYATTS_VENV_DIR="$PROJECT_ROOT/external/freyatts-venv"
 if [ ! -x "$FREYATTS_VENV_DIR/bin/python" ]; then
     echo "Creating FreyaTTS's own venv (kept separate -- freyatts's own torch"
@@ -186,7 +188,7 @@ if [ ! -f "$PROJECT_ROOT/models/freyatts-ko-voiceA/model.safetensors" ]; then
     echo "the freyatts-ko-voicea TTS preset."
 fi
 
-echo "== [$TARGET_LABEL] 7/7: sherpa-onnx Matcha-TTS (English, comparison only) =="
+echo "== [$TARGET_LABEL] 7/8: sherpa-onnx Matcha-TTS (English, comparison only) =="
 MATCHA_DIR="$PROJECT_ROOT/models/sherpa-matcha-en"
 if [ ! -f "$MATCHA_DIR/model-steps-3.onnx" ]; then
     echo "Downloading matcha-icefall-en_US-ljspeech (~71MB acoustic model + tokens + espeak-ng-data)..."
@@ -205,6 +207,17 @@ if [ ! -f "$MATCHA_DIR/vocos-22khz-univ.onnx" ]; then
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-22khz-univ.onnx"
 else
     echo "Vocoder already present, skipping."
+fi
+
+echo "== [$TARGET_LABEL] 8/8: TEN-VAD model =="
+TEN_VAD_DIR="$PROJECT_ROOT/models/ten-vad"
+if [ ! -f "$TEN_VAD_DIR/ten-vad.onnx" ]; then
+    echo "Downloading ten-vad.onnx (~330KB)..."
+    mkdir -p "$TEN_VAD_DIR"
+    curl -L -o "$TEN_VAD_DIR/ten-vad.onnx" \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx"
+else
+    echo "Already present at $TEN_VAD_DIR, skipping."
 fi
 
 echo "== [$TARGET_LABEL] setup complete =="

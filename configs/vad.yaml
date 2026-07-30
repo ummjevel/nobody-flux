@@ -1,0 +1,21 @@
+# Tunable parameters for src/nobody_flux/vad.py's VoiceActivityDetector
+# (TEN-VAD via sherpa_onnx). Same "swap via config, not code" idea as
+# models.yaml -- change a value here, no code edit, no CLI flag to remember.
+# See VoiceActivityDetector's own docstring/field comments for what each one
+# does and why its default is what it is.
+
+# 0.5 (TenVadModelConfig's own stock default) missed real speech entirely on
+# this dev box's mic (WSL2/WSLg PulseAudio passthrough) -- confirmed by hand
+# with scripts/_debug_vad_mic.py: a captured utterance with normal speech-level
+# RMS (0.04-0.10, not clipped) never crossed 0.5 confidence, while sweeping
+# threshold down showed detection kicks in reliably at 0.3 and stays reliable
+# below that. Lowered with a small safety margin under the confirmed working
+# point, not down at the floor (0.05) where background noise false-positives
+# become more likely -- if this mic/room still under- or over-triggers,
+# re-run that debug script rather than guessing at a new number.
+threshold: 0.25
+min_silence_duration: 0.5
+min_speech_duration: 0.15
+max_speech_duration: 20.0
+pre_roll_ms: 300
+num_threads: 1
