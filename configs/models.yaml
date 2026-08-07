@@ -66,6 +66,35 @@ llm:
     params:
       model_id: LiquidAI/LFM2-350M
 
+  # Larger LFM2 variants (same family/license/architecture as lfm2-350m
+  # above). The 2026-08 roadmap research flagged LFM2-700M/1.2B as the
+  # strongest drop-in upgrade path over qwen3-0.6b for Korean quality on
+  # CPU/ARM -- 350M is the fast floor, these two trade size for quality.
+  # transformers>=4.54 has native LFM2 support (this project is on 4.57).
+  # Like lfm2-350m, device is left at NobodyLLM's default (cuda if present) --
+  # override to cpu for CM4-realistic timing. Weights download from HF on
+  # first load (no setup_common.sh step needed -- transformers fetches them).
+  #
+  # Benchmark finding (2026-08, scripts/benchmark.py, 2 Korean test wavs on
+  # this dev box's GPU): the research's "LFM2 is the strongest drop-in" did
+  # NOT hold up for this specific short-casual-Korean persona. lfm2-350m
+  # rambled in markdown bullet lists (terrible for TTS) and 존댓말; lfm2-700m
+  # had the best casual 반말 tone (closest to the 퀜 persona) but was verbose,
+  # emoji-happy, sometimes incoherent, and slower per turn (~2.7s vs
+  # qwen3-0.6b-gguf's ~1.25s). None beat qwen3-0.6b-gguf on the
+  # latency+persona-adherence balance. Kept as presets for future re-eval
+  # (esp. if reply length/format gets constrained harder in persona.py or a
+  # post-process step), but qwen3-0.6b-gguf stays the default.
+  lfm2-700m:
+    class: NobodyLLM
+    params:
+      model_id: LiquidAI/LFM2-700M
+
+  lfm2-1.2b:
+    class: NobodyLLM
+    params:
+      model_id: LiquidAI/LFM2-1.2B
+
 tts:
   moss-tts-nano:
     class: NobodyTTS
