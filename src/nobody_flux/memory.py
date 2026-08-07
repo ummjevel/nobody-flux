@@ -96,6 +96,38 @@ def _extract_json_array(raw_text: str) -> list[dict]:
     return memories
 
 
+def _dedupe_memories(memories: list[dict]) -> list[dict]:
+    """Collapses same-(category, key) items down to one, keeping the
+    highest-confidence version (None counts lowest -- an unscored guess
+    shouldn't beat a scored one) and, among ties, the one that appeared
+    first in `memories` (the model's own first answer, before it possibly
+    contradicts itself later in the same output).
+
+    Observed in practice, not just theoretical: a single extraction call
+    over a 3-turn test conversation produced two near-duplicate items for
+    the same underlying fact under different categories (interest and
+    recurring_topic both keyed "취미"/"고양이 키우기") -- see
+    docs/memory-design.md's "다음 단계". Same (category, key) pair is the
+    dedup key rather than just `key` alone, since two *different*
+    categories legitimately sharing a key name (e.g. interest/취미 vs
+    preference/취미) aren't necessarily the same fact.
+    """
+    best: dict[tuple[str, str], dict] = {}
+    for m in memories:
+        dedup_key = (m["category"], m["key"])
+        existing = best.get(dedup_key)
+        if existing is None:
+            best[dedup_key] = m
+            continue
+        existing_confidence = existing["confidence"] if existing["confidence"] is not None else -1.0
+        new_confidence = m["confidence"] if m["confidence"] is not None else -1.0
+        if new_confidence > existing_confidence:
+            best[dedup_key] = m
+    # dict preserves insertion order (first-seen dedup_key position) --
+    # keeps output order stable/predictable rather than regrouped by key.
+    return list(best.values())
+
+
 def extract_memories(llm, turns: list[tuple[str, str]]) -> list[dict]:
     """Run one extraction pass over a session's (user_text, reply_text)
     turns, returning parsed memory dicts (category/key/value/confidence).
@@ -110,12 +142,22 @@ def extract_memories(llm, turns: list[tuple[str, str]]) -> list[dict]:
 
     Returns [] immediately for an empty session, without spending a
     generation call extracting nothing from nothing.
+
+    Deduping (_dedupe_memories) happens before the MAX_MEMORIES_PER_SESSION
+    cap, not after -- a session that produces 12 raw items collapsing to 8
+    unique facts should save all 8, not get truncated to 10 raw items first
+    and lose facts to duplicates that were sitting inside the cut line.
+    Cross-session duplicates (the same fact re-extracted in a later
+    session) are handled separately, at read time, by
+    ConversationStore.recent_memories -- this function only ever sees one
+    session's turns, so it can't know about those.
     """
     if not turns:
         return []
     transcript = _build_transcript(turns)
     raw_text = llm.generate_raw(EXTRACTION_SYSTEM_PROMPT, transcript, max_new_tokens=512)
-    return _extract_json_array(raw_text)[:MAX_MEMORIES_PER_SESSION]
+    memories = _dedupe_memories(_extract_json_array(raw_text))
+    return memories[:MAX_MEMORIES_PER_SESSION]
 
 
 def format_recall_block(memories: list[tuple]) -> str:

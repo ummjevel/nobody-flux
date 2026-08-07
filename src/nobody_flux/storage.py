@@ -208,11 +208,32 @@ class ConversationStore:
         docs/memory-design.md's "다음 세션에 어떻게 반영할까" for why this is
         bounded rather than injecting every fact ever extracted into the
         system prompt.
+
+        Deduped across sessions by (category, key): the same fact can get
+        re-extracted session after session (e.g. "이름: 지수" said again in
+        a later conversation) since memory.py's extraction only ever sees
+        one session's turns and has no way to know it already saved this --
+        without dedup here, `limit` recent-but-repetitive rows could crowd
+        out other distinct facts entirely. Uses a window function (SQLite
+        3.25+, bundled with Python 3.11+'s stdlib sqlite3) to keep, per
+        (category, key), only the highest-confidence/most-recent row before
+        applying ORDER BY/LIMIT -- same tie-break rule as the outer query,
+        just scoped per key first. Doesn't delete the superseded rows (this
+        is a read-time view, not a write-time merge) -- `memories` stays a
+        full history; only what gets recalled into the next session's
+        prompt is collapsed.
         """
         return self._conn.execute(
             """
-            SELECT category, key, value, confidence
-            FROM memories
+            SELECT category, key, value, confidence FROM (
+                SELECT category, key, value, confidence, created_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY category, key
+                           ORDER BY confidence IS NULL, confidence DESC, created_at DESC
+                       ) AS rn
+                FROM memories
+            )
+            WHERE rn = 1
             ORDER BY confidence IS NULL, confidence DESC, created_at DESC
             LIMIT ?
             """,

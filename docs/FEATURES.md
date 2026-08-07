@@ -59,10 +59,12 @@
     `format_recall_block()`으로 불릿 리스트 텍스트로 만들어
     `NobodyLLM`/`NobodyLLMGguf`의 `system_prompt_suffix`에 주입 (persona의
     `SYSTEM_PROMPT` 뒤에 붙음). 기억이 하나도 없으면(첫 실행) 빈 문자열이라 아무 변화 없음.
+  - 중복 정리: 한 세션 안에서 같은 (category, key)가 여러 값으로 뽑히면 confidence 높은 쪽만
+    남김 (`memory.py`의 `_dedupe_memories`, 상한 자르기 전에 적용). 세션을 넘나드는 중복(같은
+    사실이 나중에 또 추출됨)은 `recent_memories`가 SQL window function으로 (category, key)별
+    최고 confidence/최신 행만 recall (테이블 자체는 안 지움, 읽을 때만 접는 뷰).
   - 검증된 리스크: 0.6B급 모델이 사소해 보이는 사실을 자꾸 빈 배열로 건너뛰는 경향이 있어서,
     추출 프롬프트에 원샷 예시를 넣어야 했음 (`memory.py`의 `EXTRACTION_SYSTEM_PROMPT`).
-  - 아직 안 한 것: 중복/모순되는 기억을 정리·병합하는 로직 (`docs/memory-design.md` "다음
-    단계" 참고).
 
 ### 벤치마크
 - `scripts/benchmark.py`: 고정 테스트셋(`--wav-dir`, 기본 `data/benchmark_wavs/`, 커밋 안 됨 —

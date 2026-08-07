@@ -78,8 +78,18 @@ recall 시 상한)를 그대로 구현하고, `scripts/talk.py`가 세션 종료
 
 - **했음**: `memories` 테이블 스키마, 이 설계 문서, `src/nobody_flux/memory.py`(추출 +
   recall 포맷팅), `storage.py`의 `save_memory`/`recent_memories`, `talk.py`의 세션
-  시작/종료 연결
+  시작/종료 연결, 중복 정리:
+  - **한 세션 안 중복** (`memory.py`의 `_dedupe_memories`): 한 번의 추출 호출이 같은
+    (category, key)에 대해 서로 다른 값을 두 개 뽑아내는 경우 — 실제로 검증 중 관측됨
+    (`interest`/`취미`가 confidence 다르게 두 번 뽑힘) — confidence 높은 쪽만 남김.
+    `MAX_MEMORIES_PER_SESSION` 자르기 전에 적용해서, 중복 제거로 실제 고유 사실 수가
+    줄어든 다음에 상한을 적용함 (자른 다음 중복 제거하면 상한 안에 중복만 남고 다른
+    사실이 밀려날 수 있어서).
+  - **세션 간 중복** (`storage.py`의 `recent_memories`): 같은 사실이 여러 세션에 걸쳐
+    반복 추출되는 경우 (예: "이름: 지수"를 다음 세션에서 또 언급) — SQL window function으로
+    `(category, key)`별 최고 confidence/최신 행만 남기고 recall. `memories` 테이블 자체는
+    안 지움 (읽을 때만 접는 뷰이지, 쓸 때 병합하는 게 아님) — 전체 이력은 그대로 남아있음.
 - **다음 단계**: 여러 세션에 걸쳐 실제로 써보면서 추출 품질(특히 `confidence` 값이 실제로
-  의미 있게 매겨지는지) 확인, 기억이 쌓이면서 중복/모순되는 값 정리·병합하는 로직 (지금은
-  `recent_memories`가 confidence/최신순 상위 N개만 자를 뿐 중복 제거는 안 함 — 위 검증에서도
-  `interest`/`recurring_topic`에 같은 값이 중복으로 뽑힌 것 확인)
+  의미 있게 매겨지는지) 확인. `memories` 테이블이 무한정 커지는 것 자체는 아직 안 다룸 —
+  지금 스케일에서는 문제 안 될 가능성이 높지만, 오래 쓰면 오래된/낮은 confidence 행을
+  정리하는 게 필요해질 수 있음.
