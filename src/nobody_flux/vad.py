@@ -1,43 +1,40 @@
-"""Energy-based voice activity detection: decides when one spoken turn starts
-and ends, without a wakeword or full streaming ASR.
+"""Voice activity detection: decides when one spoken turn starts and ends,
+without a wakeword or full streaming ASR.
 
-Deliberately simple: RMS energy over short frames, compared against two
-thresholds (start/silence), gated by minimum speech/silence durations. This
-is *not* a real VAD model (no ML, no noise-robustness beyond the thresholds
-below) -- it's the smallest thing that turns "record for N seconds" into
-"record until the person stops talking," which is what makes talk.py feel
-like a conversation instead of a walkie-talkie.
+TEN-VAD (via sherpa_onnx's built-in support -- same runtime already used for
+ASR, see asr.py, so no new dependency) replaces this project's original
+hand-rolled RMS-energy-threshold VAD: a real trained model instead of two
+fixed thresholds that need per-room/per-mic retuning by hand (that version's
+still in git history if the tradeoff ever needs revisiting -- no ML model,
+but also no ~330KB onnx file or onnxruntime inference cost per frame).
 
 Known limits (document, don't silently paper over):
-  - A single fixed energy threshold doesn't adapt to room noise floor or mic
-    gain -- SILENCE_THRESHOLD/START_THRESHOLD below WILL need retuning per
-    microphone/environment. Override via the constructor, not by editing
-    these constants.
   - No barge-in: recording only happens between turns, not during TTS
     playback. Full-duplex is out of scope for this pass (see pipeline.py).
+  - TEN-VAD's own thresholds (threshold/min_silence_duration/etc, all
+    overridable via the constructor) are still just defaults tuned on
+    whatever TEN Framework's own eval set looked like -- not guaranteed
+    optimal for any specific mic/room either, just a better starting point
+    than a hand-picked RMS cutoff.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
 import numpy as np
+import sherpa_onnx
 import sounddevice as sd
+
+from .paths import PROJECT_ROOT
 
 SAMPLE_RATE = 16_000
 FRAME_MS = 30
 FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_MS / 1000)
 
-# RMS (on float32 samples in [-1, 1]) above which a frame counts as "speech."
-# Typical quiet-room speech at a normal mic distance lands well above this;
-# typical room noise floor lands well below it -- but "typical" is doing a
-# lot of work in that sentence, hence the module docstring's warning.
-START_THRESHOLD = 0.02
-SILENCE_THRESHOLD = 0.012
-
-START_MS = 150  # must see speech-level energy for this long to start recording
-SILENCE_MS = 800  # must see silence for this long (after speech) to end the turn
-MAX_UTTERANCE_MS = 20_000  # hard cap so a stuck-open mic can't hang the loop forever
+DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "ten-vad" / "ten-vad.onnx"
 
 
 @dataclass
@@ -48,32 +45,70 @@ class Utterance:
 
 @dataclass
 class VoiceActivityDetector:
-    start_threshold: float = START_THRESHOLD
-    silence_threshold: float = SILENCE_THRESHOLD
-    start_ms: int = START_MS
-    silence_ms: int = SILENCE_MS
-    max_utterance_ms: int = MAX_UTTERANCE_MS
-
-    _start_frames_needed: int = field(init=False)
-    _silence_frames_needed: int = field(init=False)
-    _max_frames: int = field(init=False)
+    model_path: Path = DEFAULT_MODEL_PATH
+    # TenVadModelConfig's own defaults (confirmed by introspecting the
+    # installed sherpa_onnx build) -- listed explicitly here rather than left
+    # implicit, so they show up as something callers can override the same
+    # way as every other field, and so this file doesn't silently change
+    # behavior if sherpa_onnx ever changes ITS defaults.
+    threshold: float = 0.5
+    min_silence_duration: float = 0.5  # seconds of trailing silence -> segment ends
+    # TenVadModelConfig's own default is 0.25s -- lowered here. This
+    # project's persona (persona.py) is a casual, one/two-word-backchannel
+    # kind of conversation ("네", "응"), and a single casual Korean syllable
+    # said quickly can plausibly run under 250ms; at the original default
+    # those would get silently discarded as noise, i.e. the user says
+    # something and nothing happens, no error, no log line, just silence.
+    min_speech_duration: float = 0.15
+    max_speech_duration: float = 20.0  # hard cap so a stuck-open mic can't hang forever
+    num_threads: int = 1
+    # The VAD needs a few frames of evidence before it's confident speech has
+    # started, so `segment.start` (see listen_for_utterance) tends to land
+    # slightly after the true onset -- confirmed by hand: without this, the
+    # first word or so of an utterance was reliably clipped. Padding the
+    # returned audio backward by this much compensates.
+    pre_roll_ms: int = 300
 
     def __post_init__(self):
-        self._start_frames_needed = max(1, self.start_ms // FRAME_MS)
-        self._silence_frames_needed = max(1, self.silence_ms // FRAME_MS)
-        self._max_frames = max(1, self.max_utterance_ms // FRAME_MS)
+        ten_vad_config = sherpa_onnx.TenVadModelConfig(
+            model=str(self.model_path),
+            threshold=self.threshold,
+            min_silence_duration=self.min_silence_duration,
+            min_speech_duration=self.min_speech_duration,
+            max_speech_duration=self.max_speech_duration,
+        )
+        vad_config = sherpa_onnx.VadModelConfig(
+            ten_vad=ten_vad_config, sample_rate=SAMPLE_RATE, num_threads=self.num_threads
+        )
+        # buffer_size_in_seconds: sherpa_onnx's own internal ring buffer for
+        # audio it's still deciding about -- 100s is comfortably above
+        # max_speech_duration so it never has to drop samples mid-utterance.
+        self._vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=100)
 
-    def listen_for_utterance(self) -> Utterance:
+    def listen_for_utterance(self, on_speech_start: Callable[[], None] | None = None) -> Utterance:
         """Block until one spoken turn has been captured, then return it.
 
-        State machine: IDLE (waiting for start_frames_needed consecutive
-        loud frames) -> RECORDING (buffering, waiting for silence_frames_needed
-        consecutive quiet frames after having recorded anything) -> return.
+        Feeds mic frames into the VAD's streaming accept_waveform() until it
+        queues one finished segment (its own internal state machine handles
+        speech/silence timing per the thresholds above). Rather than
+        returning that segment's own `samples` directly, this keeps its own
+        copy of every frame fed in since the last reset() and slices the
+        returned audio out of THAT -- using `segment.start` as the cut point,
+        pulled back by pre_roll_ms -- since the VAD's own segment tends to
+        start a bit after the true onset (see pre_roll_ms's docstring).
+
+        on_speech_start: called once, the instant the VAD's internal
+        "currently in speech" flag first flips true. Optional -- this
+        function otherwise blocks silently for however long that takes,
+        which from the caller's side is indistinguishable from "not
+        listening at all"; a caller like talk.py can use this to print
+        something so the user isn't staring at an unchanging "... listening
+        ..." wondering if the mic works.
         """
-        frames: list[np.ndarray] = []
-        loud_streak = 0
-        quiet_streak = 0
-        recording = False
+        self._vad.reset()
+        speaking = False
+        frames: list[np.ndarray] = []  # every frame since reset(), for the pre-roll slice below
+        pre_roll_samples = int(SAMPLE_RATE * self.pre_roll_ms / 1000)
 
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -83,30 +118,21 @@ class VoiceActivityDetector:
         ) as stream:
             while True:
                 block, _overflowed = stream.read(FRAME_SAMPLES)
-                block = block[:, 0]
-                energy = float(np.sqrt(np.mean(np.square(block))))
+                # InputStream.read() may reuse its internal buffer across
+                # calls -- copy before stashing it past this iteration.
+                samples = block[:, 0].copy()
+                frames.append(samples)
+                self._vad.accept_waveform(samples)
 
-                if not recording:
-                    if energy >= self.start_threshold:
-                        loud_streak += 1
-                    else:
-                        loud_streak = 0
-                    if loud_streak >= self._start_frames_needed:
-                        recording = True
-                        frames.extend([block] * loud_streak)  # don't clip the onset
-                    continue
+                if not speaking and self._vad.is_speech_detected():
+                    speaking = True
+                    if on_speech_start is not None:
+                        on_speech_start()
 
-                frames.append(block)
-
-                if energy < self.silence_threshold:
-                    quiet_streak += 1
-                else:
-                    quiet_streak = 0
-
-                if quiet_streak >= self._silence_frames_needed:
-                    break
-                if len(frames) >= self._max_frames:
-                    break
-
-        audio = np.concatenate(frames) if frames else np.zeros(0, dtype="float32")
-        return Utterance(audio=audio, sample_rate=SAMPLE_RATE)
+                if not self._vad.empty():
+                    segment = self._vad.front
+                    self._vad.pop()
+                    full_audio = np.concatenate(frames)
+                    start = max(0, segment.start - pre_roll_samples)
+                    end = segment.start + len(segment.samples)
+                    return Utterance(audio=full_audio[start:end], sample_rate=SAMPLE_RATE)

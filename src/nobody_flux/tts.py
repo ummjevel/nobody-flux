@@ -43,6 +43,16 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+# sherpa_onnx (used by SherpaMatchaTts below) needs the same
+# libonnxruntime.so symlink + LD_LIBRARY_PATH setup that asr.py's
+# module-level code performs before its own `import sherpa_onnx` -- relying
+# on that having already run rather than repeating it here, since
+# registry.py always imports asr before tts (`from . import asr, llm, tts`)
+# and that's the only real entry point into this module. Importing tts.py
+# some other way, before asr.py, would need the same dance asr.py does.
+import sherpa_onnx  # noqa: E402 -- see asr.py's module docstring for why this needs LD_LIBRARY_PATH set first
+import soundfile as sf  # noqa: E402
+
 from ._procio import LineReader, StderrDrainer, clean_subprocess_env
 from .paths import PROJECT_ROOT
 
@@ -253,3 +263,83 @@ class FreyaTtsKo:
             self._proc.wait(timeout=5)
         except Exception:
             self._proc.kill()
+
+
+DEFAULT_MATCHA_DIR = PROJECT_ROOT / "models" / "sherpa-matcha-en"
+DEFAULT_MATCHA_ACOUSTIC_MODEL = DEFAULT_MATCHA_DIR / "model-steps-3.onnx"
+DEFAULT_MATCHA_VOCODER = DEFAULT_MATCHA_DIR / "vocos-22khz-univ.onnx"
+DEFAULT_MATCHA_TOKENS = DEFAULT_MATCHA_DIR / "tokens.txt"
+DEFAULT_MATCHA_DATA_DIR = DEFAULT_MATCHA_DIR / "espeak-ng-data"
+
+
+@dataclass
+class SherpaMatchaTts:
+    """TTS candidate: sherpa-onnx's Matcha-TTS support (flow-matching,
+    non-autoregressive -- same general shape as SenseVoice's speed profile).
+
+    k2-fsa itself only ships English (en_US-ljspeech) and Chinese (zh-baker)
+    Matcha-TTS checkpoints (confirmed by hand against every sherpa-onnx
+    release, 1.12.19 through 1.13.2) -- no official Korean one. The
+    sherpa-matcha-ko preset (configs/models.yaml) points at a
+    community/custom-trained Korean acoustic model instead (see
+    models/shepa-matcha-ko/, `maintainer: freyatts-ko` in its own ONNX
+    metadata -- the same lineage as this project's freyatts-ko-voicea TTS
+    preset). That checkpoint ships as *just* the acoustic model, no
+    tokens.txt/vocoder/espeak-ng-data of its own -- confirmed via its ONNX
+    metadata (`comment: "Korean Matcha-TTS, espeak-ng ko phonemes, icefall
+    tokens.txt ids"`, `sample_rate: 22050`) that it uses the SAME espeak-ng
+    phoneme scheme and mel spec as the English checkpoint, so the
+    sherpa-matcha-ko preset reuses the English preset's tokens.txt/vocoder/
+    data_dir rather than needing its own copies. espeak-ng-data itself is a
+    multi-language phoneme dictionary package (not English-specific despite
+    living under models/sherpa-matcha-en/) -- it already bundles Korean
+    (espeak-ng-data/lang/ko, ko_dict).
+
+    Each of the four model files is its own independently-overridable `Path`
+    field (matching e.g. VibeAsrBitnet's vae_model/lm_model in asr.py) rather
+    than a shared model_dir + filenames, specifically so a preset's acoustic
+    model and its (shared, reused) vocoder/tokens/data_dir can live in
+    different directories without any path-juggling in this class.
+
+    Unlike MOSS-TTS-Nano/FreyaTTS, this needs no subprocess or isolated venv
+    at all: sherpa_onnx is already an in-process dependency of this project
+    (see asr.py's NobodyASR), and its Matcha-TTS support is just another
+    config on the same `sherpa_onnx.OfflineTts` API family as
+    `OfflineRecognizer` -- so this class loads the model once in
+    __post_init__ and calls it directly, no LineReader/StderrDrainer/warm
+    server machinery needed.
+    """
+
+    acoustic_model: Path = DEFAULT_MATCHA_ACOUSTIC_MODEL
+    vocoder: Path = DEFAULT_MATCHA_VOCODER
+    tokens: Path = DEFAULT_MATCHA_TOKENS
+    data_dir: Path = DEFAULT_MATCHA_DATA_DIR
+    num_threads: int = 2
+    # CPU-only, explicitly (sherpa_onnx's own default is also "cpu", but
+    # spelling it out here means that stays true even if upstream ever
+    # changes its default -- this project has no CUDA-capable onnxruntime
+    # build set up for sherpa_onnx anyway, see asr.py's sense-voice-small,
+    # which is CPU for the same reason).
+    provider: str = "cpu"
+    speaker_id: int = 0
+    speed: float = 1.0
+
+    def __post_init__(self):
+        matcha_config = sherpa_onnx.OfflineTtsMatchaModelConfig(
+            acoustic_model=str(self.acoustic_model),
+            vocoder=str(self.vocoder),
+            tokens=str(self.tokens),
+            data_dir=str(self.data_dir),
+        )
+        model_config = sherpa_onnx.OfflineTtsModelConfig(
+            matcha=matcha_config, num_threads=self.num_threads, provider=self.provider
+        )
+        self.tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=model_config))
+
+    def synthesize(self, text: str, out_path: str) -> str:
+        """Synthesize `text` (English only -- see class docstring) to a wav
+        at `out_path`, at whatever sample rate the acoustic model/vocoder
+        pair uses (22050Hz for vocos-22khz-univ.onnx)."""
+        audio = self.tts.generate(text, sid=self.speaker_id, speed=self.speed)
+        sf.write(out_path, audio.samples, samplerate=audio.sample_rate)
+        return out_path

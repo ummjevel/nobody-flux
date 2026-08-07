@@ -23,6 +23,13 @@ models/**/*.onnx
 models/**/*.gguf
 models/**/*.safetensors
 
+# sherpa-onnx Matcha-TTS checkpoints (English + Korean) -- entire directories
+# fetched/placed by scripts/setup_common.sh (or by hand, for the Korean one),
+# including their non-weight auxiliary files (tokens.txt, README.md,
+# espeak-ng-data/), same "not committed" rule as the weights above.
+models/sherpa-matcha-en/
+models/shepa-matcha-ko/
+
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/
 
@@ -39,3 +46,6 @@ data/*.db-journal
 Thumbs.db
 .vscode/
 .idea/
+
+# Local Claude Code settings (machine-specific permissions, not project config)
+.claude/

@@ -1,5 +1,6 @@
 """Loads configs/models.yaml and instantiates named ASR/LLM/TTS presets.
-Also loads configs/voices.yaml for TTS reference-clip selection (resolve_voice).
+Also loads configs/voices.yaml for TTS reference-clip selection (resolve_voice)
+and configs/vad.yaml for VoiceActivityDetector's tunable parameters.
 
 This is the "swap models via config, not code" layer: scripts/run_pipeline.py
 and scripts/talk.py both go through build_asr/build_llm/build_tts instead of
@@ -18,11 +19,12 @@ from typing import Any
 
 import yaml
 
-from . import asr, llm, tts
+from . import asr, llm, tts, vad
 from .paths import PROJECT_ROOT
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
 VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
+VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -31,8 +33,10 @@ _CLASSES: dict[str, type] = {
     "NobodyASR": asr.NobodyASR,
     "VibeAsrBitnet": asr.VibeAsrBitnet,
     "NobodyLLM": llm.NobodyLLM,
+    "NobodyLLMGguf": llm.NobodyLLMGguf,
     "NobodyTTS": tts.NobodyTTS,
     "FreyaTtsKo": tts.FreyaTtsKo,
+    "SherpaMatchaTts": tts.SherpaMatchaTts,
 }
 
 
@@ -138,3 +142,16 @@ def resolve_voice(name: str | None = None) -> Path:
 
 def list_voices() -> list[str]:
     return sorted(_load_yaml(VOICES_CONFIG_PATH)["voices"])
+
+
+def build_vad(**overrides) -> vad.VoiceActivityDetector:
+    """VoiceActivityDetector isn't a named preset like asr/llm/tts (there's
+    only one implementation, TEN-VAD -- see vad.py), just a config's worth of
+    tunable numeric parameters, so this reads configs/vad.yaml as a flat dict
+    straight into the constructor rather than going through _build()'s
+    preset-name indirection. **overrides works the same way as
+    build_asr/build_llm/build_tts's, for one-off tuning without editing the
+    yaml (e.g. from a REPL)."""
+    config = _load_yaml(VAD_CONFIG_PATH)
+    config.update(overrides)
+    return vad.VoiceActivityDetector(**config)

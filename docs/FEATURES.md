@@ -9,7 +9,7 @@
 ### 파이프라인 (ASR → LLM → TTS)
 - **ASR**: SenseVoice-Small (sherpa-onnx, 한국어) — `src/nobody_flux/asr.py`
 - **LLM**: Qwen3-0.6B (transformers) — `src/nobody_flux/llm.py`, 페르소나는 `persona.py`
-  ("루카스", 20~30대 또래 친구 톤, 반말)
+  ("퀜", 20~30대 또래 친구 톤, 반말)
 - **TTS**: MOSS-TTS-Nano (voice-clone, 참조 음성 필요) — `src/nobody_flux/tts.py`, 자기 자신의
   격리된 venv(`external/MOSS-TTS-Nano/.venv`)에서 서브프로세스로 실행됨
 
