@@ -6,11 +6,26 @@ single STSPipeline alive for the whole session -- so NobodyLLM.history carries
 across turns and it's an actual multi-turn conversation, not N independent
 one-shot calls.
 
-Turn boundaries come from vad.py's simple energy-based VAD (no wakeword, no
+Turn boundaries come from vad.py's TEN-VAD-based VAD (no wakeword, no
 push-to-talk): it starts recording when you start talking and stops when you
 stop. See vad.py's docstring for the tuning knobs and its limits -- if it cuts
 you off early or won't stop listening, that's threshold tuning, not a bug to
 route around here.
+
+Barge-in: listening for the next utterance starts as soon as this turn's
+reply begins playing (not after playback finishes), so speaking while nobody
+is still talking cuts the reply off immediately instead of waiting it out.
+See play_async/on_speech_start below.
+
+No echo cancellation: the mic is listening the whole time nobody's reply
+plays out of the speaker, and there's no acoustic-echo-cancellation step
+between them, so on setups where the reply bleeds back into the mic loud
+enough for TEN-VAD to mistake it for speech, that will register as a
+false-positive barge-in (nobody interrupting itself). Not observed on this
+dev box's WSL2/WSLg passthrough setup (playback and mic capture are
+different logical devices there), but worth knowing if it happens on a
+setup with real speaker-into-mic leakage -- fix would be AEC or a
+headset/earbuds, not a VAD threshold tweak.
 
 WSL note: this machine is WSL2. Mic capture through WSLg's audio passthrough
 is not guaranteed to work -- if sounddevice can't see an input device, or
@@ -54,9 +69,17 @@ PLAYBACK_TIMEOUT_MARGIN_S = 5.0
 GREETING_TEXT = "안녕, 나 지금 듣고 있어."
 
 
-def play_with_timeout(audio, sample_rate: int) -> None:
-    """Like sd.play() + sd.wait(), but never blocks the session's turn loop
-    forever.
+def play_async(audio, sample_rate: int, playback_active: threading.Event) -> threading.Thread:
+    """Like sd.play() + sd.wait(), but runs on a background thread (so the
+    caller can start listening for the next utterance immediately, for
+    barge-in -- see module docstring) and never blocks that thread forever.
+
+    playback_active is set for the duration of this specific clip's
+    playback and cleared right before returning -- it's how on_speech_start
+    (below, in main()) decides whether "speech just started" means
+    "interrupt the reply that's currently playing" or "just the normal start
+    of the next turn." Cleared in a `finally` so a timeout or an explicit
+    sd.stop() from a barge-in both still leave it correctly cleared.
 
     sd.wait() has no timeout parameter -- if the underlying audio backend
     stalls mid-playback, this would otherwise hang forever, and from a caller
@@ -71,20 +94,36 @@ def play_with_timeout(audio, sample_rate: int) -> None:
     paid the full margin as dead time even when nothing was stalled. Calling
     the real sd.wait() on a background thread and joining it with a timeout
     gets fast completion back (wait() returns as soon as playback genuinely
-    ends) while still bounding the wait if the backend truly does stall.
+    ends, including a barge-in's early sd.stop()) while still bounding the
+    wait if the backend truly does stall.
+
+    Returns the background thread so the caller can join() it before
+    starting the *next* clip's playback (sd.play() itself would just cut the
+    previous clip off, but leaving the previous watchdog thread running past
+    that point serves no purpose).
     """
+    playback_active.set()
     sd.play(audio, sample_rate)
     timeout = len(audio) / sample_rate + PLAYBACK_TIMEOUT_MARGIN_S
-    done = threading.Event()
 
     def _wait():
-        sd.wait()
-        done.set()
+        done = threading.Event()
 
-    threading.Thread(target=_wait, daemon=True).start()
-    if not done.wait(timeout=timeout):
-        logger.warning("[playback] timed out, stopping and moving on to the next turn")
-        sd.stop()
+        def _mark_done():
+            sd.wait()
+            done.set()
+
+        threading.Thread(target=_mark_done, daemon=True).start()
+        try:
+            if not done.wait(timeout=timeout):
+                logger.warning("[playback] timed out, stopping and moving on to the next turn")
+                sd.stop()
+        finally:
+            playback_active.clear()
+
+    thread = threading.Thread(target=_wait, daemon=True)
+    thread.start()
+    return thread
 
 # Default loguru sink already includes a timestamp; this just tightens the
 # format to level + message (module/line noise isn't useful for a live
@@ -113,12 +152,25 @@ def main():
         "tts": "[TTS] synthesizing...",
     }
 
+    # Set for exactly the duration of a reply/greeting clip's playback (see
+    # play_async) -- on_speech_start uses this to tell "barge-in during a
+    # reply" apart from "the normal start of the next turn while nothing is
+    # playing." No lock needed: on_speech_start only ever reads this from the
+    # single thread running vad.listen_for_utterance's loop, and play_async's
+    # own background thread is the only writer.
+    playback_active = threading.Event()
+    playback_thread: threading.Thread | None = None
+
     def on_speech_start():
         # Printed the instant VAD's IDLE->RECORDING transition fires, not
         # after the whole utterance is captured -- otherwise "... listening
         # ..." is the only thing on screen for however long you're mid-turn,
         # which looks identical to the mic just not working at all.
-        logger.info("[VAD] speech detected, recording...")
+        if playback_active.is_set():
+            logger.info("[VAD] barge-in detected, stopping playback")
+            sd.stop()
+        else:
+            logger.info("[VAD] speech detected, recording...")
 
     def on_stage_start(stage: str):
         logger.info(STAGE_LABELS[stage])
@@ -140,15 +192,29 @@ def main():
     pipeline.tts.synthesize(GREETING_TEXT, out_path=str(greeting_wav))
     logger.info(f"[nobody] {GREETING_TEXT}")
     greeting_audio, greeting_sr = sf.read(str(greeting_wav), dtype="float32")
-    play_with_timeout(greeting_audio, greeting_sr)
+    playback_thread = play_async(greeting_audio, greeting_sr, playback_active)
 
     turn_index = 0
     try:
         while True:
             logger.info("... listening ...")
+            # Deliberately starts before playback_thread (the previous
+            # turn's reply, or the greeting) has necessarily finished --
+            # that overlap is what makes barge-in possible. on_speech_start
+            # is what actually cuts the still-playing clip off; this call
+            # blocks until an utterance completes either way, so by the time
+            # it returns playback has always stopped one way or another.
             utterance = vad.listen_for_utterance(on_speech_start=on_speech_start)
             if utterance.audio.size == 0:
                 continue
+
+            # Not strictly necessary (on_speech_start already stopped
+            # playback if this was a barge-in, and play_async's own
+            # background thread clears playback_active itself once done) --
+            # but joining here means the *next* play_async call below can't
+            # race with this one's watchdog thread still winding down.
+            if playback_thread is not None:
+                playback_thread.join()
 
             duration_s = len(utterance.audio) / utterance.sample_rate
             logger.info(f"[VAD] silence detected, recording ended ({duration_s:.1f}s captured)")
@@ -168,7 +234,7 @@ def main():
 
             logger.info("[playback] playing reply...")
             reply_audio, reply_sr = sf.read(str(wav_out), dtype="float32")
-            play_with_timeout(reply_audio, reply_sr)
+            playback_thread = play_async(reply_audio, reply_sr, playback_active)
 
             store.log_turn(
                 session_id,
@@ -187,6 +253,14 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # Cut off whatever's still playing rather than letting it run out on
+        # its own after Ctrl+C -- and join so play_async's watchdog thread
+        # doesn't outlive the process it's a daemon thread of anyway, but
+        # this makes the "playback stopped" state deterministic before the
+        # rest of shutdown runs.
+        sd.stop()
+        if playback_thread is not None:
+            playback_thread.join(timeout=1.0)
         # Shut down any server-backed ASR/TTS subprocess (VibeAsrBitnet,
         # FreyaTtsKo) cleanly on exit -- these stay alive across turns for
         # speed (that's the whole point), so nothing else stops them.
