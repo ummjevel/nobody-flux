@@ -17,6 +17,12 @@ reply begins playing (not after playback finishes), so speaking while nobody
 is still talking cuts the reply off immediately instead of waiting it out.
 See play_async/on_speech_start below.
 
+Known gap: on_speech_start currently stops playback on ANY detected speech,
+including short backchannel ("어", "응") that shouldn't count as an
+interruption -- persona.py's casual persona makes these common. Not fixed
+yet; see docs/barge-in-design.md for the planned duration + lexical
+disambiguation.
+
 No echo cancellation: the mic is listening the whole time nobody's reply
 plays out of the speaker, and there's no acoustic-echo-cancellation step
 between them, so on setups where the reply bleeds back into the mic loud
