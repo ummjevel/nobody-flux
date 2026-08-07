@@ -52,6 +52,17 @@ barge-in 구현(`talk.py`)은 그 짧은 발화가 감지되는 순간 무조건
   타이밍과 backchannel 타이밍을 동시에 개선. 이 프로젝트의 캐스케이드(ASR→LLM→TTS) 구조와는
   전제 자체가 다른 접근(end-to-end 음성 모델)이라 직접 적용은 스코프 밖이지만, "barge-in과
   backchannel을 하나의 연속적인 판단으로 다뤄야 한다"는 방향성은 참고할 만함.
+- **OpenAI — [GPT-Live](https://openai.com/index/continuous-voice-interaction-with-gpt-live/)**
+  (3세대 ChatGPT 음성 시스템): Moshi와 같은 결론을 한 번 더 확인해줌 — "turn detector를
+  오디오 경로에서 아예 제거"했다고 발표했는데, 이게 가능한 이유는 GPT-Live가 **풀-듀플렉스
+  종단간 음성 모델**이라 계속 듣고 계속 말하면서 턴 전환 자체를 모델이 암묵적으로 처리하기
+  때문. 이전 세대는 무음 기반 turn detection을 썼는데, 짧은 침묵이나 배경 소음도 "발화
+  끝남"으로 오인해서 부자연스러운 타이밍에 끼어드는 문제가 있었다고 함 — 이 프로젝트가 VAD
+  임계값을 실측으로 튜닝해야 했던 것과 같은 종류의 문제. **하지만 이건 이 프로젝트(캐스케이드
+  ASR→LLM→TTS)에는 바로 적용 불가**: turn detector를 없애려면 ASR/LLM/TTS 세 스테이지를
+  하나의 음성-투-음성 모델로 합쳐야 하는데, 그건 지금 프로토타입 스코프를 훨씬 넘어서는
+  재설계이자 CM4 같은 온디바이스 타깃에 올리기도 비현실적임. "VAD를 지우자"가 아니라 "VAD가
+  필요 없어지려면 아키텍처 자체가 바뀌어야 한다"는 게 정확한 결론.
 - **Amazon Science — [Contextual Acoustic Barge-in Classification](https://www.amazon.science/publications/contextual-acoustic-barge-in-classification-for-spoken-dialog-systems)**:
   Alexa도 진짜/가짜 barge-in을 오디오만으로 분류하는 지도학습 모델을 씀 (LSTM 기반, baseline
   대비 F1 4.5% 개선). 여기서도 어휘보다 오디오 신호 우선.
@@ -167,3 +178,9 @@ BACKCHANNEL_MAX_DURATION_S = 0.6
   소형 오디오 전용 분류기(수백만 파라미터, CPU에서 30ms 이내 추론) 도입을 고려. 다만 학습
   데이터 수집·훈련이 필요해서 이 프로젝트 지금 단계(프로토타입 검증)보다는 CM4 실기 검증
   이후, 실사용 데이터가 쌓인 다음이 더 적절한 시점.
+- **훨씬 더 나중에(완전히 다른 아키텍처, 스코프 밖)**: OpenAI GPT-Live/Kyutai Moshi처럼
+  ASR/LLM/TTS 세 스테이지를 통째로 풀-듀플렉스 종단간 음성 모델 하나로 대체하면 VAD/turn
+  detector 자체가 필요 없어짐. 이건 "barge-in 튜닝"이 아니라 이 프로젝트의 근본 아키텍처를
+  바꾸는 얘기라 완전히 별개 스코프 — CM4 같은 온디바이스 타깃에 그 정도 크기의 종단간 모델을
+  올리는 것도 현실성이 낮음. 참고만 하고 이 문서의 범위(캐스케이드 구조 안에서 VAD 튜닝)는
+  유지.
