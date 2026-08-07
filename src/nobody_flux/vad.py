@@ -27,9 +27,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .turn_detector import TurnDetector
 import sherpa_onnx
 import sounddevice as sd
 
@@ -84,6 +87,14 @@ class VoiceActivityDetector:
     # one decides whether speech that's already confirmed real is *long
     # enough to be a barge-in rather than a backchannel*.
     barge_in_confirm_ms: int = 250
+    # Only used when listen_for_utterance is given a turn_detector (Smart Turn
+    # v3 endpoint detection -- see that arg's docstring): after the detector
+    # says a just-finished segment is an *incomplete* turn (user paused
+    # mid-thought, didn't actually finish), this is how long to keep waiting
+    # for them to resume before giving up and returning what we have anyway.
+    # Bounds the "wait for continuation" so a wrong "incomplete" verdict can't
+    # hang the turn forever when the user really was done.
+    endpoint_grace_ms: int = 800
 
     def __post_init__(self):
         ten_vad_config = sherpa_onnx.TenVadModelConfig(
@@ -105,6 +116,7 @@ class VoiceActivityDetector:
         self,
         on_speech_start: Callable[[], None] | None = None,
         on_barge_in_confirmed: Callable[[], None] | None = None,
+        turn_detector: "TurnDetector | None" = None,
     ) -> Utterance:
         """Block until one spoken turn has been captured, then return it.
 
@@ -117,29 +129,46 @@ class VoiceActivityDetector:
         pulled back by pre_roll_ms -- since the VAD's own segment tends to
         start a bit after the true onset (see pre_roll_ms's docstring).
 
-        on_speech_start: called once, the instant the VAD's internal
-        "currently in speech" flag first flips true. Optional -- this
-        function otherwise blocks silently for however long that takes,
-        which from the caller's side is indistinguishable from "not
+        on_speech_start: called once per captured segment, the instant the
+        VAD's internal "currently in speech" flag first flips true. Optional
+        -- this function otherwise blocks silently for however long that
+        takes, which from the caller's side is indistinguishable from "not
         listening at all"; a caller like talk.py can use this to print
         something so the user isn't staring at an unchanging "... listening
         ..." wondering if the mic works.
 
-        on_barge_in_confirmed: called once, when speech has continued for
-        barge_in_confirm_ms past on_speech_start -- see that field's
+        on_barge_in_confirmed: called once per turn, when speech has continued
+        for barge_in_confirm_ms past on_speech_start -- see that field's
         docstring and docs/barge-in-design.md. Fires strictly after
         on_speech_start, never instead of it. This is stage 1 of that doc's
         two-stage design (delayed-stop); stage 2 (post-hoc lexical check
         against the ASR result once this call returns) is the caller's job,
         not this function's -- this function only knows audio, never text.
+
+        turn_detector: optional Smart Turn v3 endpoint detector (see
+        turn_detector.py). When given, a segment that TEN-VAD finalized on
+        silence is NOT immediately returned -- the detector is asked whether
+        it's a *complete* turn or a mid-thought pause. On "incomplete," this
+        keeps listening (up to endpoint_grace_ms of continued silence, or
+        max_speech_duration total) and concatenates any continuation onto the
+        same utterance, so a natural pause ("음... 그러니까...") doesn't get
+        chopped into separate turns the way pure silence-based endpointing
+        does. When None, behaviour is exactly the old single-segment,
+        silence-only endpointing (unchanged). Note: the accumulation loop
+        below is logic-reviewed but NOT yet validated on a live mic (this dev
+        env's WSL2 mic constraint -- see talk.py) -- treat the default
+        (turn_detector=None) as the trusted path.
         """
-        self._vad.reset()
-        speaking = False
-        barge_in_confirmed = False
-        speech_samples_seen = 0  # samples fed in since on_speech_start fired
-        frames: list[np.ndarray] = []  # every frame since reset(), for the pre-roll slice below
         pre_roll_samples = int(SAMPLE_RATE * self.pre_roll_ms / 1000)
         confirm_samples = int(SAMPLE_RATE * self.barge_in_confirm_ms / 1000)
+        grace_frames = max(1, int(self.endpoint_grace_ms / FRAME_MS))
+        max_samples = int(SAMPLE_RATE * self.max_speech_duration)
+
+        # Audio from earlier segments the detector judged "incomplete" -- the
+        # continuation gets concatenated onto this. None until the first
+        # incomplete verdict; stays None entirely when turn_detector is None.
+        carried: np.ndarray | None = None
+        barge_in_fired = False  # hoisted across segments: one barge-in per turn, not per segment
 
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -147,30 +176,60 @@ class VoiceActivityDetector:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
         ) as stream:
-            while True:
-                block, _overflowed = stream.read(FRAME_SAMPLES)
-                # InputStream.read() may reuse its internal buffer across
-                # calls -- copy before stashing it past this iteration.
-                samples = block[:, 0].copy()
-                frames.append(samples)
-                self._vad.accept_waveform(samples)
+            while True:  # outer loop: one iteration captures one VAD segment
+                self._vad.reset()
+                speaking = False
+                speech_samples_seen = 0
+                silence_frames_while_waiting = 0
+                frames: list[np.ndarray] = []
 
-                if not speaking and self._vad.is_speech_detected():
-                    speaking = True
-                    if on_speech_start is not None:
-                        on_speech_start()
+                while True:  # inner loop: accumulate frames until one segment finalizes
+                    block, _overflowed = stream.read(FRAME_SAMPLES)
+                    # InputStream.read() may reuse its internal buffer across
+                    # calls -- copy before stashing it past this iteration.
+                    samples = block[:, 0].copy()
+                    frames.append(samples)
+                    self._vad.accept_waveform(samples)
 
-                if speaking and not barge_in_confirmed:
-                    speech_samples_seen += len(samples)
-                    if speech_samples_seen >= confirm_samples:
-                        barge_in_confirmed = True
-                        if on_barge_in_confirmed is not None:
-                            on_barge_in_confirmed()
+                    if not speaking and self._vad.is_speech_detected():
+                        speaking = True
+                        if on_speech_start is not None:
+                            on_speech_start()
 
-                if not self._vad.empty():
-                    segment = self._vad.front
-                    self._vad.pop()
-                    full_audio = np.concatenate(frames)
-                    start = max(0, segment.start - pre_roll_samples)
-                    end = segment.start + len(segment.samples)
-                    return Utterance(audio=full_audio[start:end], sample_rate=SAMPLE_RATE)
+                    # Grace timeout: only relevant once we're carrying an
+                    # "incomplete" turn and waiting to see if the user resumes.
+                    # If they don't start speaking again within endpoint_grace_ms
+                    # of silence, treat the carried audio as the final turn --
+                    # the detector's "incomplete" was wrong (they were done).
+                    if carried is not None and not speaking:
+                        silence_frames_while_waiting += 1
+                        if silence_frames_while_waiting >= grace_frames:
+                            return Utterance(audio=carried, sample_rate=SAMPLE_RATE)
+
+                    if speaking and not barge_in_fired:
+                        speech_samples_seen += len(samples)
+                        if speech_samples_seen >= confirm_samples:
+                            barge_in_fired = True
+                            if on_barge_in_confirmed is not None:
+                                on_barge_in_confirmed()
+
+                    if not self._vad.empty():
+                        segment = self._vad.front
+                        self._vad.pop()
+                        full_audio = np.concatenate(frames)
+                        start = max(0, segment.start - pre_roll_samples)
+                        end = segment.start + len(segment.samples)
+                        seg_audio = full_audio[start:end]
+                        break
+
+                combined = seg_audio if carried is None else np.concatenate([carried, seg_audio])
+
+                if turn_detector is None:
+                    return Utterance(audio=combined, sample_rate=SAMPLE_RATE)
+
+                is_complete, _prob = turn_detector.predict(combined, SAMPLE_RATE)
+                if is_complete or len(combined) >= max_samples:
+                    return Utterance(audio=combined, sample_rate=SAMPLE_RATE)
+                # Incomplete: keep this audio and loop to capture the
+                # continuation (bounded by grace timeout above and max_samples).
+                carried = combined

@@ -49,6 +49,12 @@
     `should_continue_after_asr` 훅으로 LLM/TTS/저장을 아예 스킵. 파라미터(`barge_in_confirm_ms`,
     단어 목록)는 실측 전 추정치 — LiveKit Adaptive Interruption Handling 사례(216ms 중앙값)로
     보정했지만 이 프로젝트 마이크로는 아직 검증 안 함.
+  - **엔드포인트 감지(옵션, `talk.py --endpoint-detect`)**: pipecat-ai Smart Turn v3
+    (`src/nobody_flux/turn_detector.py`, 8M ONNX, CPU ~12ms, 한국어 지원)로 "사용자가 말을
+    끝냈나 vs 문장 중간 멈춤인가"를 판단해, 순수 침묵 기반 엔드포인팅이 자연스러운 멈춤을
+    잘라버리는 걸 완화 (`vad.py`의 누적 루프). 기본 꺼짐 — 실시간 루프는 마이크 미검증.
+    참고: 원래 backchannel 필터 대체용으로 붙였다가 실측 결과 end-of-turn 모델이라 맞장구
+    구분엔 부적합해서 엔드포인트 용도로 재활용 (`docs/barge-in-design.md`).
 - `scripts/run_pipeline.py`: 기존 1회성 wav-in/wav-out CLI. 자동화 테스트, 프리셋 간 결정론적
   비교(같은 입력 wav로 latency/출력 비교)용으로 유지.
 

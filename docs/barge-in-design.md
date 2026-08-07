@@ -166,18 +166,47 @@ BACKCHANNEL_MAX_DURATION_S = 0.6
    스코프 밖 — run_pipeline.py/benchmark.py도 wav 파일 기반이지 실시간 오디오 상호작용은
    테스트 대상이 아님).
 
+## Smart Turn v3 실험: backchannel엔 부적합 → 엔드포인트 감지로 재활용
+
+위 "더 나중에" 항목에서 "소형 오디오 전용 분류기"는 학습 데이터가 필요해 스코프 밖이라고
+적었는데, 그 전제가 틀렸다 — pipecat-ai의 **Smart Turn v3**가 이미 학습돼 공개돼 있다 (8M
+파라미터, int8 ONNX ~8.7MB, CPU ~12ms, 23개 언어 중 한국어 포함, BSD-2). 그래서 이걸
+stage 2(어휘 필터) 대체용으로 붙여보려고 `src/nobody_flux/turn_detector.py`로 통합했다.
+
+**그런데 실측해보니 backchannel 구분엔 안 맞았다.** 합성 음성으로 확인 (prob_complete =
+"완결된 턴일 확률"):
+
+| 발화 | 종류 | prob_complete |
+|---|---|---|
+| "응" | 맞장구 | 0.723 |
+| "오늘 날씨 정말 좋다" | 진짜 턴 | 0.728 |
+| "그래서 있잖아... 있었는데" | 진짜 턴(말끝 흐림) | 0.506 |
+| "어" | 맞장구 | 0.588 |
+
+맞장구 "응"(0.723)이 말끝 흐리는 진짜 문장(0.506)보다 높게 나온다. 이유는 명확하다 — Smart
+Turn은 **"이 사람이 말을 끝냈나(end-of-turn)"** 를 판단하는 모델이지 "맞장구냐 진짜 턴이냐"를
+구분하는 게 아니다. "응"은 그 자체로 완결된 발화라 높게 나오는 게 오히려 정상. (합성 음성
+기준이라 실제 사람 맞장구 운율과는 다를 수 있다는 한계는 있음.)
+
+**결론**: Smart Turn을 stage 2에 넣으면 오히려 악화되므로 안 넣는다. 어휘 필터
+(`backchannel.py`) 유지. 대신 Smart Turn은 원래 용도인 **엔드포인트 감지**로 재활용했다 —
+`vad.py`의 `listen_for_utterance(turn_detector=...)`가 TEN-VAD가 침묵으로 세그먼트를 끊었을
+때, 바로 반환하지 않고 Smart Turn에게 "완결된 턴이냐 문장 중간 멈춤이냐" 물어봐서, 미완결이면
+`endpoint_grace_ms` 동안 이어질 발화를 더 기다렸다가 이어붙인다 (순수 침묵 기반 엔드포인팅이
+"음... 그러니까..." 같은 자연스러운 멈춤을 별개 턴으로 잘라버리는 문제 완화). `talk.py
+--endpoint-detect`로 켬 (기본 꺼짐 — 실시간 누적 루프는 아직 마이크 미검증). `predict()` 자체는
+검증됨.
+
 ## 다음 단계
 
 - **했음**: 이 설계 문서, 관련 연구/업계 사례 조사, vad.py/backchannel.py/pipeline.py/talk.py
-  구현, 단위 테스트 + end-to-end 스모크 테스트
+  구현, 단위 테스트 + end-to-end 스모크 테스트, Smart Turn v3 엔드포인트 감지 통합
+  (`turn_detector.py`)
 - **다음 단계**: 위 "검증 계획"대로 마이크로 실측(`scripts/_debug_vad_mic.py` 확장) →
-  `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/`BACKCHANNEL_MAX_DURATION_S` 파라미터 확정.
-  이 프로젝트 개발 환경(WSL2)에서 마이크 테스트가 불안정할 수 있어(`talk.py` 문서 참고),
-  H100 서버(네이티브 Linux)에서 시도할 것.
-- **더 나중에(스코프 밖, 참고용)**: 지속시간+어휘 휴리스틱으로도 부족하면, Krisp/LiveKit류
-  소형 오디오 전용 분류기(수백만 파라미터, CPU에서 30ms 이내 추론) 도입을 고려. 다만 학습
-  데이터 수집·훈련이 필요해서 이 프로젝트 지금 단계(프로토타입 검증)보다는 CM4 실기 검증
-  이후, 실사용 데이터가 쌓인 다음이 더 적절한 시점.
+  `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/`BACKCHANNEL_MAX_DURATION_S` +
+  Smart Turn 엔드포인트(`complete_threshold`/`endpoint_grace_ms`, `vad.py`의 누적 루프)
+  파라미터 확정. 이 프로젝트 개발 환경(WSL2)에서 마이크 테스트가 불안정할 수 있어(`talk.py`
+  문서 참고), H100 서버(네이티브 Linux)에서 시도할 것.
 - **훨씬 더 나중에(완전히 다른 아키텍처, 스코프 밖)**: OpenAI GPT-Live/Kyutai Moshi처럼
   ASR/LLM/TTS 세 스테이지를 통째로 풀-듀플렉스 종단간 음성 모델 하나로 대체하면 VAD/turn
   detector 자체가 필요 없어짐. 이건 "barge-in 튜닝"이 아니라 이 프로젝트의 근본 아키텍처를

@@ -144,11 +144,23 @@ logger.add(sys.stderr, format="<green>{time:HH:mm:ss.SSS}</green> | {message}")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_pipeline_args(parser)
+    parser.add_argument(
+        "--endpoint-detect",
+        action="store_true",
+        help="use Smart Turn v3 endpoint detection (don't cut the user off on a "
+        "mid-thought pause). Off by default -- the real-time accumulation loop is "
+        "not yet mic-validated (see vad.py's listen_for_utterance docstring).",
+    )
     args = parser.parse_args()
 
     logger.info("Loading models...")
     pipeline, presets = build_pipeline_from_args(args)
     vad = registry.build_vad()
+    # Built only when asked (loading the onnx model + Whisper feature extractor
+    # isn't free) -- passed into every listen_for_utterance call below.
+    turn_detector = registry.build_turn_detector() if args.endpoint_detect else None
+    if turn_detector is not None:
+        logger.info("[turn] Smart Turn v3 endpoint detection enabled")
     store = ConversationStore()
     session_id = store.start_session()
     session_dir = SESSION_AUDIO_DIR / str(session_id)
@@ -239,7 +251,9 @@ def main():
             # until an utterance completes either way, so by the time it
             # returns playback has always stopped one way or another.
             utterance = vad.listen_for_utterance(
-                on_speech_start=on_speech_start, on_barge_in_confirmed=on_barge_in_confirmed
+                on_speech_start=on_speech_start,
+                on_barge_in_confirmed=on_barge_in_confirmed,
+                turn_detector=turn_detector,
             )
             if utterance.audio.size == 0:
                 continue

@@ -19,12 +19,13 @@ from typing import Any
 
 import yaml
 
-from . import asr, llm, tts, vad
+from . import asr, llm, tts, turn_detector, vad
 from .paths import PROJECT_ROOT
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
 VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
+TURN_DETECTOR_CONFIG_PATH = PROJECT_ROOT / "configs" / "turn_detector.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -155,3 +156,15 @@ def build_vad(**overrides) -> vad.VoiceActivityDetector:
     config = _load_yaml(VAD_CONFIG_PATH)
     config.update(overrides)
     return vad.VoiceActivityDetector(**config)
+
+
+def build_turn_detector(**overrides) -> turn_detector.TurnDetector:
+    """Same flat-config pattern as build_vad -- Smart Turn v3 is the only
+    turn-detector implementation, so this reads configs/turn_detector.yaml
+    straight into the constructor rather than being a named preset. Loading
+    the model (onnxruntime session + Whisper feature extractor) happens in
+    TurnDetector.__post_init__, so this is only worth calling when a caller
+    actually wants endpoint detection (talk.py builds it lazily)."""
+    config = _load_yaml(TURN_DETECTOR_CONFIG_PATH)
+    config.update(overrides)
+    return turn_detector.TurnDetector(**config)

@@ -1,0 +1,14 @@
+# Tunable parameters for src/nobody_flux/turn_detector.py's TurnDetector
+# (pipecat-ai Smart Turn v3). Same "swap via config, not code" idea as
+# models.yaml/vad.yaml. See TurnDetector's docstring + docs/barge-in-design.md
+# for what this model does (semantic END-OF-TURN / turn-completeness), and the
+# empirically-confirmed caveat that it is NOT a backchannel classifier.
+
+# sigmoid(logit) >= this counts as a complete turn. 0.5 is the model's own
+# stock boundary. In vad.py's endpoint use, "not complete" means "user
+# probably just paused mid-thought, keep listening" -- so a LOWER threshold
+# makes vad.py less eager to keep waiting (returns the turn sooner), a HIGHER
+# one makes it wait for stronger evidence of completion. Not tuned against
+# this project's own mic yet (docs/barge-in-design.md's "검증 계획").
+complete_threshold: 0.5
+num_threads: 1
