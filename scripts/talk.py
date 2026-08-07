@@ -52,6 +52,7 @@ from loguru import logger
 
 from _cli import add_pipeline_args, build_pipeline_from_args
 from src.nobody_flux import registry
+from src.nobody_flux.memory import extract_memories, format_recall_block
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
 
@@ -145,6 +146,19 @@ def main():
     session_id = store.start_session()
     session_dir = SESSION_AUDIO_DIR / str(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    # docs/memory-design.md's "다음 세션에 어떻게 반영할까": recall happens
+    # once, here, before the first turn -- not re-fetched mid-session, since
+    # nothing in *this* session can add to `memories` until it ends (see the
+    # extraction call in `finally` below). format_recall_block() returns ""
+    # when there's nothing to recall yet (first session ever), and
+    # NobodyLLM/NobodyLLMGguf's reply() only appends system_prompt_suffix to
+    # the persona prompt when it's non-empty -- so this is a no-op on a
+    # fresh install, not a special case to branch on here.
+    recall_block = format_recall_block(store.recent_memories())
+    if recall_block:
+        pipeline.llm.system_prompt_suffix = recall_block
+        logger.info(f"[memory] recalled from previous sessions:\n{recall_block}")
 
     STAGE_LABELS = {
         "asr": "[ASR] transcribing...",
@@ -261,6 +275,32 @@ def main():
         sd.stop()
         if playback_thread is not None:
             playback_thread.join(timeout=1.0)
+
+        # Session-end batch extraction (docs/memory-design.md's recommended
+        # timing over per-turn) -- runs before pipeline.close() since it
+        # still needs pipeline.llm loaded. Skipped for a 0-turn session
+        # (Ctrl+C before saying anything): nothing was said, nothing to
+        # extract, and it'd otherwise burn a generation call on an empty
+        # transcript. Failure here (model output too malformed for
+        # memory.py's defensive parser to salvage anything, or a generation
+        # error) is logged and swallowed, not raised -- extraction failing
+        # shouldn't take the rest of shutdown down with it.
+        if turn_index > 0:
+            try:
+                session_turns = [
+                    (user_text, reply_text)
+                    for _asr, _llm, _tts, user_text, reply_text in store.turns_for_session(
+                        session_id
+                    )
+                ]
+                logger.info("[memory] extracting from this session...")
+                memories = extract_memories(pipeline.llm, session_turns)
+                for m in memories:
+                    store.save_memory(session_id, m["category"], m["key"], m["value"], m["confidence"])
+                logger.info(f"[memory] saved {len(memories)} fact(s)")
+            except Exception:
+                logger.exception("[memory] extraction failed, skipping")
+
         # Shut down any server-backed ASR/TTS subprocess (VibeAsrBitnet,
         # FreyaTtsKo) cleanly on exit -- these stay alive across turns for
         # speed (that's the whole point), so nothing else stops them.

@@ -45,11 +45,24 @@
 - `scripts/run_pipeline.py`: 기존 1회성 wav-in/wav-out CLI. 자동화 테스트, 프리셋 간 결정론적
   비교(같은 입력 wav로 latency/출력 비교)용으로 유지.
 
-### 저장
+### 저장 & 기억(개인화)
 - `src/nobody_flux/storage.py`: SQLite (`data/conversations.db`, 커밋 안 됨).
   - `sessions`: talk.py 세션 단위
   - `turns`: 매 턴의 user_text/reply_text, 사용된 프리셋, 스테이지별 소요시간(ms)
-  - `memories`: 스키마만 존재, 아직 아무것도 안 씀 (`docs/memory-design.md` 참고)
+  - `memories`: 세션 종료 시 추출된 사실 (category/key/value/confidence)
+- `src/nobody_flux/memory.py` + `talk.py` 연결 (`docs/memory-design.md` 참고):
+  - 세션 종료 시 그 세션의 모든 turns를 한 번에 LLM에 넣어 JSON 배열로 사실을 추출
+    (`extract_memories`) → `ConversationStore.save_memory`로 저장. 방어적 파싱(코드펜스/잡설이
+    섞여도 첫 `[`~마지막 `]` 구간만 파싱, 실패하면 빈 배열로 취급)과 세션당 상한
+    (`MAX_MEMORIES_PER_SESSION=10`)이 있음.
+  - 세션 시작 시 `ConversationStore.recent_memories()`(confidence·최신순 상위 10개)를
+    `format_recall_block()`으로 불릿 리스트 텍스트로 만들어
+    `NobodyLLM`/`NobodyLLMGguf`의 `system_prompt_suffix`에 주입 (persona의
+    `SYSTEM_PROMPT` 뒤에 붙음). 기억이 하나도 없으면(첫 실행) 빈 문자열이라 아무 변화 없음.
+  - 검증된 리스크: 0.6B급 모델이 사소해 보이는 사실을 자꾸 빈 배열로 건너뛰는 경향이 있어서,
+    추출 프롬프트에 원샷 예시를 넣어야 했음 (`memory.py`의 `EXTRACTION_SYSTEM_PROMPT`).
+  - 아직 안 한 것: 중복/모순되는 기억을 정리·병합하는 로직 (`docs/memory-design.md` "다음
+    단계" 참고).
 
 ### 벤치마크
 - `scripts/benchmark.py`: 고정 테스트셋(`--wav-dir`, 기본 `data/benchmark_wavs/`, 커밋 안 됨 —
@@ -71,7 +84,6 @@
   전사가 아님.
 - **다른 후보 모델의 실제 구현**: ASR(`vibeasr-bitnet`)과 TTS(`freyatts-ko-voicea`)는 두 번째
   프리셋이 붙었지만, LLM은 여전히 레지스트리 인프라만 있고 두 번째 구현은 없음.
-- **기억 추출 로직**: 스키마만 있고 실제로 뽑아서 채우는 코드 없음.
 
 ## 프리셋 추가하는 법 (모델 스왑 확장)
 
@@ -89,6 +101,6 @@
 
 ## 다음 단계로 제안하는 것 (구현 안 함, 우선순위 순 아님)
 
-- 기억 추출 실제 구현 (`docs/memory-design.md`)
+- 기억 정리/병합 로직 (중복·모순되는 항목이 쌓이는 문제, `docs/memory-design.md` 참고)
 - CM4 실기에서의 실측 (리서치 문서가 애초에 요구했던 전제 — "모델 선정보다 CM4 실측 PoC가
   선행되어야 함")

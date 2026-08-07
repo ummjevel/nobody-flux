@@ -169,11 +169,52 @@ class ConversationStore:
 
     def turns_for_session(self, session_id: int) -> list[tuple]:
         """Every turn logged under session_id, in order -- backs
-        scripts/benchmark.py's --verbose transcript listing."""
+        scripts/benchmark.py's --verbose transcript listing, and
+        talk.py's session-end memory extraction (see memory.py)."""
         return self._conn.execute(
             """
             SELECT asr_preset, llm_preset, tts_preset, user_text, reply_text
             FROM turns WHERE session_id = ? ORDER BY turn_index
             """,
             (session_id,),
+        ).fetchall()
+
+    def save_memory(
+        self,
+        session_id: int,
+        category: str,
+        key: str,
+        value: str,
+        confidence: float | None = None,
+    ) -> int:
+        """Writes one extracted fact -- see docs/memory-design.md for the
+        category vocabulary and src/nobody_flux/memory.py for what calls
+        this (talk.py's session-end extraction pass)."""
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO memories (session_id, category, key, value, confidence, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, category, key, value, confidence, _now()),
+            )
+            return cur.lastrowid
+
+    def recent_memories(self, limit: int = 10) -> list[tuple]:
+        """Highest-confidence memories first (rows with no confidence score
+        sort last, not first -- SQLite's default is NULL-first on ASC, so
+        `confidence IS NULL` as the primary sort key inverts that), most
+        recent as the tiebreaker. Capped at `limit` -- see
+        docs/memory-design.md's "다음 세션에 어떻게 반영할까" for why this is
+        bounded rather than injecting every fact ever extracted into the
+        system prompt.
+        """
+        return self._conn.execute(
+            """
+            SELECT category, key, value, confidence
+            FROM memories
+            ORDER BY confidence IS NULL, confidence DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()

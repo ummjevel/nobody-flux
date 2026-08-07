@@ -1,9 +1,12 @@
 # 기억(개인화) 설계 문서
 
-**상태: 설계만, 구현 없음.** `src/nobody_flux/storage.py`의 `memories` 테이블은 이 문서가
-설명하는 스키마로 이미 만들어져 있지만, 아무 코드도 거기에 쓰지 않는다. 실제 추출 로직을
-구현하기 전에 Qwen3-0.6B가 구조화 추출(structured extraction)을 얼마나 안정적으로 해내는지
-검증이 필요하다고 판단해 이번 라운드에서는 스키마 설계까지만 진행했다.
+**상태: 구현됨.** `src/nobody_flux/memory.py`가 이 문서의 설계(일괄 요약, 방어적 JSON 파싱,
+recall 시 상한)를 그대로 구현하고, `scripts/talk.py`가 세션 종료 시 추출(`extract_memories`)
++ 세션 시작 시 recall(`format_recall_block` → `NobodyLLM.system_prompt_suffix`)을 호출한다.
+검증: `qwen3-0.6b-gguf`로 3턴짜리 샘플 대화(이름/반려동물 언급 포함) 추출 → 정확히 파싱된
+`identity`/`interest` 항목이 나오는 것 확인. 처음 프롬프트로는 모델이 사소해 보이는 사실을
+자꾸 빈 배열로 건너뛰어서(`EXTRACTION_SYSTEM_PROMPT`), 원샷 예시를 프롬프트에 추가해서
+고쳤다 — 아래 "리스크" 절이 우려했던 바로 그 문제였다.
 
 ## 왜 필요한가
 
@@ -73,6 +76,10 @@
 
 ## 이번에 한 것 vs 다음 단계
 
-- **했음**: `memories` 테이블 스키마 (`storage.py`), 이 설계 문서
-- **다음 단계**: 세션 종료 시 추출 프롬프트 실험 → 품질 확인 → `talk.py`에 추출 호출 연결 →
-  세션 시작 시 기억 주입 로직 → (선택) 기억이 너무 쌓이면 정리/병합하는 로직
+- **했음**: `memories` 테이블 스키마, 이 설계 문서, `src/nobody_flux/memory.py`(추출 +
+  recall 포맷팅), `storage.py`의 `save_memory`/`recent_memories`, `talk.py`의 세션
+  시작/종료 연결
+- **다음 단계**: 여러 세션에 걸쳐 실제로 써보면서 추출 품질(특히 `confidence` 값이 실제로
+  의미 있게 매겨지는지) 확인, 기억이 쌓이면서 중복/모순되는 값 정리·병합하는 로직 (지금은
+  `recent_memories`가 confidence/최신순 상위 N개만 자를 뿐 중복 제거는 안 함 — 위 검증에서도
+  `interest`/`recurring_topic`에 같은 값이 중복으로 뽑힌 것 확인)

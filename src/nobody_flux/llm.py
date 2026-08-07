@@ -32,6 +32,12 @@ class NobodyLLM:
     # one/two-sentence exchanges.
     max_history_turns: int = 6
     history: list[dict] = field(default_factory=list)
+    # Appended (blank-line separated) to persona.SYSTEM_PROMPT in reply() --
+    # talk.py sets this after loading configs/memory-design.md-style recalled
+    # memories (registry.py's presets never set it; there's no yaml field for
+    # it, this is a runtime-only knob). Empty by default: no memory, no
+    # change in behavior from before memory.py existed.
+    system_prompt_suffix: str = ""
 
     def __post_init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
@@ -56,8 +62,11 @@ class NobodyLLM:
         acceptable for this prototype's short exchanges (see max_history_turns),
         but worth revisiting during the on-device optimization pass this repo defers.
         """
+        system_content = SYSTEM_PROMPT
+        if self.system_prompt_suffix:
+            system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             *self.history,
             {"role": "user", "content": user_text},
         ]
@@ -91,6 +100,40 @@ class NobodyLLM:
         if len(self.history) > max_messages:
             self.history = self.history[-max_messages:]
         return reply_text
+
+    @torch.no_grad()
+    def generate_raw(
+        self, system_prompt: str, user_text: str, max_new_tokens: int | None = None
+    ) -> str:
+        """One-off generation with an arbitrary system_prompt -- no history
+        read or write, no persona.SYSTEM_PROMPT. Used by memory.py's
+        extraction pass, which needs a completely different instruction
+        ("extract facts as JSON") than this instance's conversational
+        persona/history and shouldn't read from or pollute either. Reuses
+        this instance's already-loaded tokenizer/model rather than spinning
+        up a second one just for a single extraction call.
+
+        do_sample=False (greedy) unlike reply()'s sampling -- structured
+        extraction should be deterministic/repeatable, not varied turn to
+        turn like a chat reply.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+
+        out_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens or self.max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        new_ids = out_ids[0, inputs["input_ids"].shape[1] :]
+        return self.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
 
 
 DEFAULT_GGUF_MODEL_PATH = PROJECT_ROOT / "models" / "qwen3-0.6b-gguf" / "Qwen3-0.6B-Q4_K_M.gguf"
@@ -140,6 +183,8 @@ class NobodyLLMGguf:
     max_new_tokens: int = 96
     max_history_turns: int = 6
     history: list[dict] = field(default_factory=list)
+    # Same purpose as NobodyLLM's field of the same name -- see its docstring.
+    system_prompt_suffix: str = ""
 
     def __post_init__(self):
         from llama_cpp import Llama
@@ -156,8 +201,11 @@ class NobodyLLMGguf:
         self.history = []
 
     def reply(self, user_text: str) -> str:
+        system_content = SYSTEM_PROMPT
+        if self.system_prompt_suffix:
+            system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             *self.history,
             {"role": "user", "content": user_text},
         ]
@@ -184,3 +232,25 @@ class NobodyLLMGguf:
         if len(self.history) > max_messages:
             self.history = self.history[-max_messages:]
         return reply_text
+
+    def generate_raw(
+        self, system_prompt: str, user_text: str, max_new_tokens: int | None = None
+    ) -> str:
+        """See NobodyLLM.generate_raw's docstring -- same contract, same
+        reason to exist (memory.py's extraction pass), llama-cpp-python
+        backend instead of raw transformers.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+        out = self._llm.create_completion(
+            prompt,
+            max_tokens=max_new_tokens or self.max_new_tokens,
+            temperature=0.0,
+            stop=["<|im_end|>"],
+        )
+        return out["choices"][0]["text"].strip()
