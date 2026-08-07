@@ -34,6 +34,8 @@
 #  10. download the Smart Turn v3 onnx model (src/nobody_flux/turn_detector.py
 #      -- optional semantic end-of-turn detector, used by talk.py's
 #      --endpoint-detect; see that module's docstring)
+#  11. download the streaming Zipformer Korean ASR model (third ASR candidate,
+#      src/nobody_flux/asr.py's StreamingZipformerAsr docstring)
 #
 # NOTE on WSL2/drvfs (/mnt/c/...) checkouts: both external/ clones above
 # involve either heavy Python package imports (MOSS-TTS-Nano) or a multi-file
@@ -57,10 +59,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/10: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/11: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/10: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/11: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -73,7 +75,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/10: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/11: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -87,7 +89,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/10: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/11: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -115,7 +117,7 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
 
-echo "== [$TARGET_LABEL] 5/10: VibeASR.cpp (ASR candidate, compiled binary) =="
+echo "== [$TARGET_LABEL] 5/11: VibeASR.cpp (ASR candidate, compiled binary) =="
 VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
 if [ ! -d "$VIBEASR_DIR" ]; then
     echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
@@ -175,7 +177,7 @@ for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
     fi
 done
 
-echo "== [$TARGET_LABEL] 6/10: FreyaTTS (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 6/11: FreyaTTS (external, isolated venv) =="
 FREYATTS_VENV_DIR="$PROJECT_ROOT/external/freyatts-venv"
 if [ ! -x "$FREYATTS_VENV_DIR/bin/python" ]; then
     echo "Creating FreyaTTS's own venv (kept separate -- freyatts's own torch"
@@ -195,7 +197,7 @@ if [ ! -f "$PROJECT_ROOT/models/freyatts-ko-voiceA/model.safetensors" ]; then
     echo "the freyatts-ko-voicea TTS preset."
 fi
 
-echo "== [$TARGET_LABEL] 7/10: sherpa-onnx Matcha-TTS (English, comparison only) =="
+echo "== [$TARGET_LABEL] 7/11: sherpa-onnx Matcha-TTS (English, comparison only) =="
 MATCHA_DIR="$PROJECT_ROOT/models/sherpa-matcha-en"
 if [ ! -f "$MATCHA_DIR/model-steps-3.onnx" ]; then
     echo "Downloading matcha-icefall-en_US-ljspeech (~71MB acoustic model + tokens + espeak-ng-data)..."
@@ -216,7 +218,7 @@ else
     echo "Vocoder already present, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 8/10: TEN-VAD model =="
+echo "== [$TARGET_LABEL] 8/11: TEN-VAD model =="
 TEN_VAD_DIR="$PROJECT_ROOT/models/ten-vad"
 if [ ! -f "$TEN_VAD_DIR/ten-vad.onnx" ]; then
     echo "Downloading ten-vad.onnx (~330KB)..."
@@ -227,7 +229,7 @@ else
     echo "Already present at $TEN_VAD_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 9/10: Qwen3-0.6B GGUF (second LLM candidate) =="
+echo "== [$TARGET_LABEL] 9/11: Qwen3-0.6B GGUF (second LLM candidate) =="
 GGUF_DIR="$PROJECT_ROOT/models/qwen3-0.6b-gguf"
 if [ ! -f "$GGUF_DIR/Qwen3-0.6B-Q4_K_M.gguf" ]; then
     echo "Downloading Qwen3-0.6B-Q4_K_M.gguf (~460MB, community requant by bartowski)..."
@@ -238,7 +240,7 @@ else
     echo "Already present at $GGUF_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 10/10: Smart Turn v3 endpoint detector (optional) =="
+echo "== [$TARGET_LABEL] 10/11: Smart Turn v3 endpoint detector (optional) =="
 SMART_TURN_DIR="$PROJECT_ROOT/models/smart-turn-v3"
 if [ ! -f "$SMART_TURN_DIR/smart-turn-v3.2-cpu.onnx" ]; then
     echo "Downloading smart-turn-v3.2-cpu.onnx (~8.7MB, pipecat-ai, BSD-2)..."
@@ -247,6 +249,20 @@ if [ ! -f "$SMART_TURN_DIR/smart-turn-v3.2-cpu.onnx" ]; then
         "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx"
 else
     echo "Already present at $SMART_TURN_DIR, skipping."
+fi
+
+echo "== [$TARGET_LABEL] 11/11: streaming Zipformer Korean ASR (third ASR candidate) =="
+ZIPFORMER_DIR="$PROJECT_ROOT/models/streaming-zipformer-ko"
+if [ ! -f "$ZIPFORMER_DIR/encoder-epoch-99-avg-1.int8.onnx" ]; then
+    echo "Downloading sherpa-onnx-streaming-zipformer-korean-2024-06-16 (~60MB int8)..."
+    TMP_TAR="$(mktemp --suffix=.tar.bz2)"
+    curl -L -o "$TMP_TAR" \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2"
+    mkdir -p "$ZIPFORMER_DIR"
+    tar xjf "$TMP_TAR" -C "$ZIPFORMER_DIR" --strip-components=1
+    rm -f "$TMP_TAR"
+else
+    echo "Already present at $ZIPFORMER_DIR, skipping."
 fi
 
 echo "== [$TARGET_LABEL] setup complete =="

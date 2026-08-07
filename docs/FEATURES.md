@@ -24,6 +24,13 @@
     스페이스 문제가 없음 — `--asr vibeasr-bitnet`으로 바로 비교 가능. 매 턴 모델을
     재로딩하는 대신 상주 서버 프로세스(`asr_stream_server`)로 돌아가서 웜 상태에서
     ~2초대.
+  - ASR: `streaming-zipformer-ko` (k2-fsa 스트리밍 Zipformer transducer 한국어, Apache-2.0,
+    int8 CM4-friendly. `src/nobody_flux/asr.py`의 `StreamingZipformerAsr` 참고). 지금은
+    스트리밍 모델을 **드롭인 배치 디코드**로만 씀(전체 wav 한 번에) — 진짜 스트리밍(라이브
+    부분 transcript + recognizer 엔드포인팅)은 별개 큰 작업. 실측(합성 wav): sense-voice와
+    속도 비슷(~130ms), 내용 정확하지만 **어절 사이 스페이스가 없음**(전부 붙여 씀) — 반대로
+    sense-voice는 스페이스+구두점 있으나 다른 입력에선 어절 중간 스페이스 버그 있음. LLM은
+    스페이스 없는 입력도 무리 없이 처리. 진짜 이득은 아직 안 쓴 스트리밍 능력.
   - TTS: `freyatts-ko-voicea` (**기본값**. FreyaTTS 한국어 voiceA 체크포인트,
     voice-announce-mcp 프로젝트에서 가져옴. `src/nobody_flux/tts.py`의 `FreyaTtsKo`
     참고). `moss-tts-nano`와 달리 torch 버전을 고정하지 않아 CUDA(sm_120)가 실제로

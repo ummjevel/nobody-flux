@@ -33,6 +33,7 @@ TURN_DETECTOR_CONFIG_PATH = PROJECT_ROOT / "configs" / "turn_detector.yaml"
 _CLASSES: dict[str, type] = {
     "NobodyASR": asr.NobodyASR,
     "VibeAsrBitnet": asr.VibeAsrBitnet,
+    "StreamingZipformerAsr": asr.StreamingZipformerAsr,
     "NobodyLLM": llm.NobodyLLM,
     "NobodyLLMGguf": llm.NobodyLLMGguf,
     "NobodyTTS": tts.NobodyTTS,

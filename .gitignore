@@ -30,6 +30,11 @@ models/**/*.safetensors
 models/sherpa-matcha-en/
 models/shepa-matcha-ko/
 
+# Streaming Zipformer Korean ASR checkpoint (encoder/decoder/joiner onnx +
+# tokens.txt/bpe.model/test_wavs) -- whole directory fetched by
+# scripts/setup_common.sh, not committed. Same rule as the weights above.
+models/streaming-zipformer-ko/
+
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/
 

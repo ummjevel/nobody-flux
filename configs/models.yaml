@@ -33,6 +33,17 @@ asr:
       vae_model: models/vibeasr/vibeasr-vae-encoder-i8_s.gguf
       lm_model: models/vibeasr/vibeasr-lm-i2_s-embed-q6_k.gguf
 
+  # Third candidate: k2-fsa streaming Zipformer transducer for Korean
+  # (Apache-2.0, native Korean, streaming-capable, int8 CM4-friendly) -- see
+  # src/nobody_flux/asr.py's StreamingZipformerAsr docstring. Used here in a
+  # drop-in batch-decode way for a like-for-like comparison against
+  # sense-voice-small; the real streaming integration (live partials +
+  # recognizer endpointing) is a later, larger change. Needs
+  # models/streaming-zipformer-ko/ (scripts/setup_common.sh step 11).
+  streaming-zipformer-ko:
+    class: StreamingZipformerAsr
+    params: {}  # every field already defaults to the right paths (int8)
+
 llm:
   qwen3-0.6b:
     class: NobodyLLM

@@ -38,6 +38,7 @@ for _versioned in glob.glob(
     if not os.path.exists(_unversioned):
         os.symlink(os.path.basename(_versioned), _unversioned)
 
+import numpy as np  # noqa: E402
 import sherpa_onnx  # noqa: E402 -- needs LD_LIBRARY_PATH set (see above) before this import
 import soundfile as sf  # noqa: E402
 
@@ -81,6 +82,69 @@ class NobodyASR:
         stream.accept_waveform(sample_rate, audio)
         self.recognizer.decode_stream(stream)
         return " ".join(stream.result.text.split())
+
+
+DEFAULT_STREAMING_ZIPFORMER_DIR = PROJECT_ROOT / "models" / "streaming-zipformer-ko"
+
+
+@dataclass
+class StreamingZipformerAsr:
+    """Third ASR candidate: k2-fsa's streaming Zipformer transducer for Korean
+    (sherpa-onnx-streaming-zipformer-korean-2024-06-16, Apache-2.0). The 2026-08
+    roadmap research flagged this as the highest-ROI ASR change: it's a *streaming*
+    model (partial transcripts + built-in endpointing), native Korean, and
+    CM4-friendly at int8.
+
+    This first cut uses it in a DROP-IN, batch-style way -- transcribe_file feeds
+    the whole wav at once, marks input finished, drains the decode loop, and
+    returns the final text -- so it slots into the same interface as NobodyASR /
+    VibeAsrBitnet for an apples-to-apples accuracy/latency comparison via
+    scripts/benchmark.py, WITHOUT yet touching the pipeline's turn structure. The
+    actual streaming win (feeding mic frames live, using the recognizer's own
+    endpoint detection to end a turn instead of vad.py's silence timer) is a
+    larger, separate change gated on this drop-in comparison looking good first.
+
+    int8 by default (use_int8) -- the fp32 encoder is ~292MB vs ~127MB int8, and
+    CPU/CM4 is the target. sample_rate/feature_dim (16k/80) are this checkpoint's
+    training config, not free parameters.
+    """
+
+    model_dir: Path = DEFAULT_STREAMING_ZIPFORMER_DIR
+    use_int8: bool = True
+    num_threads: int = 2
+    # Silence padded onto the end so the transducer flushes its last few frames
+    # -- a streaming model won't emit the tail of an utterance until it sees
+    # enough trailing context (or input_finished + this padding).
+    tail_padding_s: float = 0.5
+
+    def __post_init__(self):
+        suffix = ".int8.onnx" if self.use_int8 else ".onnx"
+        self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+            tokens=str(self.model_dir / "tokens.txt"),
+            encoder=str(self.model_dir / f"encoder-epoch-99-avg-1{suffix}"),
+            decoder=str(self.model_dir / f"decoder-epoch-99-avg-1{suffix}"),
+            joiner=str(self.model_dir / f"joiner-epoch-99-avg-1{suffix}"),
+            num_threads=self.num_threads,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="greedy_search",
+        )
+
+    def transcribe_file(self, wav_path: str) -> str:
+        """Read a wav file and return the recognized Korean text, decoding the
+        whole file in one shot (see class docstring -- not yet true streaming)."""
+        audio, sample_rate = sf.read(wav_path, dtype="float32", always_2d=False)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(sample_rate, audio)
+        tail = np.zeros(int(sample_rate * self.tail_padding_s), dtype=np.float32)
+        stream.accept_waveform(sample_rate, tail)
+        stream.input_finished()
+        while self.recognizer.is_ready(stream):
+            self.recognizer.decode_stream(stream)
+        return " ".join(self.recognizer.get_result(stream).split())
 
 
 VIBEASR_REPO_DIR = PROJECT_ROOT / "external" / "VibeASR.cpp"
