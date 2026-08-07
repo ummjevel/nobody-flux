@@ -9,13 +9,18 @@ still in git history if the tradeoff ever needs revisiting -- no ML model,
 but also no ~330KB onnx file or onnxruntime inference cost per frame).
 
 Known limits (document, don't silently paper over):
-  - No barge-in: recording only happens between turns, not during TTS
-    playback. Full-duplex is out of scope for this pass (see pipeline.py).
   - TEN-VAD's own thresholds (threshold/min_silence_duration/etc, all
     overridable via the constructor) are still just defaults tuned on
     whatever TEN Framework's own eval set looked like -- not guaranteed
     optimal for any specific mic/room either, just a better starting point
     than a hand-picked RMS cutoff.
+
+barge_in_confirm_ms / on_barge_in_confirmed (see listen_for_utterance) exist
+to tell a real interruption apart from backchannel ("어", "응") -- see
+docs/barge-in-design.md for why a plain "any detected speech = barge-in"
+rule is wrong for this project's casual persona, and the research behind
+picking a duration threshold over more sophisticated (but out of scope for
+this prototype) acoustic classifiers.
 """
 
 from __future__ import annotations
@@ -68,6 +73,17 @@ class VoiceActivityDetector:
     # first word or so of an utterance was reliably clipped. Padding the
     # returned audio backward by this much compensates.
     pre_roll_ms: int = 300
+    # docs/barge-in-design.md's stage 1 (delayed-stop): how long speech has
+    # to continue past on_speech_start before on_barge_in_confirmed fires.
+    # 250ms, not this project's earlier 400ms guess -- recalibrated against
+    # LiveKit's Adaptive Interruption Handling (216ms median duration to
+    # decide, audio-only, in production), see that doc's "관련 연구" section.
+    # Deliberately separate from min_speech_duration above: that one decides
+    # whether TEN-VAD's segment finalizer treats a sound as speech at all
+    # (too low and a real backchannel gets silently dropped as noise), this
+    # one decides whether speech that's already confirmed real is *long
+    # enough to be a barge-in rather than a backchannel*.
+    barge_in_confirm_ms: int = 250
 
     def __post_init__(self):
         ten_vad_config = sherpa_onnx.TenVadModelConfig(
@@ -85,7 +101,11 @@ class VoiceActivityDetector:
         # max_speech_duration so it never has to drop samples mid-utterance.
         self._vad = sherpa_onnx.VoiceActivityDetector(vad_config, buffer_size_in_seconds=100)
 
-    def listen_for_utterance(self, on_speech_start: Callable[[], None] | None = None) -> Utterance:
+    def listen_for_utterance(
+        self,
+        on_speech_start: Callable[[], None] | None = None,
+        on_barge_in_confirmed: Callable[[], None] | None = None,
+    ) -> Utterance:
         """Block until one spoken turn has been captured, then return it.
 
         Feeds mic frames into the VAD's streaming accept_waveform() until it
@@ -104,11 +124,22 @@ class VoiceActivityDetector:
         listening at all"; a caller like talk.py can use this to print
         something so the user isn't staring at an unchanging "... listening
         ..." wondering if the mic works.
+
+        on_barge_in_confirmed: called once, when speech has continued for
+        barge_in_confirm_ms past on_speech_start -- see that field's
+        docstring and docs/barge-in-design.md. Fires strictly after
+        on_speech_start, never instead of it. This is stage 1 of that doc's
+        two-stage design (delayed-stop); stage 2 (post-hoc lexical check
+        against the ASR result once this call returns) is the caller's job,
+        not this function's -- this function only knows audio, never text.
         """
         self._vad.reset()
         speaking = False
+        barge_in_confirmed = False
+        speech_samples_seen = 0  # samples fed in since on_speech_start fired
         frames: list[np.ndarray] = []  # every frame since reset(), for the pre-roll slice below
         pre_roll_samples = int(SAMPLE_RATE * self.pre_roll_ms / 1000)
+        confirm_samples = int(SAMPLE_RATE * self.barge_in_confirm_ms / 1000)
 
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -128,6 +159,13 @@ class VoiceActivityDetector:
                     speaking = True
                     if on_speech_start is not None:
                         on_speech_start()
+
+                if speaking and not barge_in_confirmed:
+                    speech_samples_seen += len(samples)
+                    if speech_samples_seen >= confirm_samples:
+                        barge_in_confirmed = True
+                        if on_barge_in_confirmed is not None:
+                            on_barge_in_confirmed()
 
                 if not self._vad.empty():
                     segment = self._vad.front

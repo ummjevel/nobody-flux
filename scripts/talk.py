@@ -14,14 +14,14 @@ route around here.
 
 Barge-in: listening for the next utterance starts as soon as this turn's
 reply begins playing (not after playback finishes), so speaking while nobody
-is still talking cuts the reply off immediately instead of waiting it out.
-See play_async/on_speech_start below.
-
-Known gap: on_speech_start currently stops playback on ANY detected speech,
-including short backchannel ("어", "응") that shouldn't count as an
-interruption -- persona.py's casual persona makes these common. Not fixed
-yet; see docs/barge-in-design.md for the planned duration + lexical
-disambiguation.
+is still talking can cut the reply off instead of waiting it out. Two-stage
+disambiguation from backchannel ("어", "응", common given persona.py's casual
+tone) per docs/barge-in-design.md: stage 1 (real time, see
+on_barge_in_confirmed/vad.py's barge_in_confirm_ms) only cuts playback once
+speech has continued past a short duration threshold, so most backchannel
+never trips it at all; stage 2 (after ASR, see is_backchannel below) catches
+short utterances stage 1 let through and skips turn processing for them
+entirely (no LLM/TTS/storage) rather than treating them as a real reply.
 
 No echo cancellation: the mic is listening the whole time nobody's reply
 plays out of the speaker, and there's no acoustic-echo-cancellation step
@@ -58,6 +58,7 @@ from loguru import logger
 
 from _cli import add_pipeline_args, build_pipeline_from_args
 from src.nobody_flux import registry
+from src.nobody_flux.backchannel import is_backchannel
 from src.nobody_flux.memory import extract_memories, format_recall_block
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
@@ -173,11 +174,11 @@ def main():
     }
 
     # Set for exactly the duration of a reply/greeting clip's playback (see
-    # play_async) -- on_speech_start uses this to tell "barge-in during a
-    # reply" apart from "the normal start of the next turn while nothing is
-    # playing." No lock needed: on_speech_start only ever reads this from the
-    # single thread running vad.listen_for_utterance's loop, and play_async's
-    # own background thread is the only writer.
+    # play_async) -- on_barge_in_confirmed uses this to tell "barge-in during
+    # a reply" apart from "the normal start of the next turn while nothing is
+    # playing." No lock needed: both callbacks only ever read/write this from
+    # the single thread running vad.listen_for_utterance's loop, and
+    # play_async's own background thread is the only other writer.
     playback_active = threading.Event()
     playback_thread: threading.Thread | None = None
 
@@ -185,12 +186,24 @@ def main():
         # Printed the instant VAD's IDLE->RECORDING transition fires, not
         # after the whole utterance is captured -- otherwise "... listening
         # ..." is the only thing on screen for however long you're mid-turn,
-        # which looks identical to the mic just not working at all.
+        # which looks identical to the mic just not working at all. Does NOT
+        # stop playback itself anymore (see on_barge_in_confirmed) -- any
+        # detected speech used to cut the reply off immediately, which meant
+        # backchannel ("어", "응") interrupted it too. docs/barge-in-design.md
+        # stage 1.
+        logger.info("[VAD] speech detected, recording...")
+
+    def on_barge_in_confirmed():
+        # Fires once speech has continued past vad.yaml's
+        # barge_in_confirm_ms -- see vad.py's field docstring and
+        # docs/barge-in-design.md. Backchannel is short enough that this
+        # usually never fires for it at all; only stops playback if it's
+        # actually still going (a normal turn-start while nothing is
+        # playing also reaches here, is_set() is False, and this is a
+        # no-op).
         if playback_active.is_set():
-            logger.info("[VAD] barge-in detected, stopping playback")
+            logger.info("[VAD] barge-in confirmed, stopping playback")
             sd.stop()
-        else:
-            logger.info("[VAD] speech detected, recording...")
 
     def on_stage_start(stage: str):
         logger.info(STAGE_LABELS[stage])
@@ -220,11 +233,14 @@ def main():
             logger.info("... listening ...")
             # Deliberately starts before playback_thread (the previous
             # turn's reply, or the greeting) has necessarily finished --
-            # that overlap is what makes barge-in possible. on_speech_start
-            # is what actually cuts the still-playing clip off; this call
-            # blocks until an utterance completes either way, so by the time
-            # it returns playback has always stopped one way or another.
-            utterance = vad.listen_for_utterance(on_speech_start=on_speech_start)
+            # that overlap is what makes barge-in possible. on_barge_in_confirmed
+            # is what actually cuts the still-playing clip off (once
+            # confirmed real, not on the first frame); this call blocks
+            # until an utterance completes either way, so by the time it
+            # returns playback has always stopped one way or another.
+            utterance = vad.listen_for_utterance(
+                on_speech_start=on_speech_start, on_barge_in_confirmed=on_barge_in_confirmed
+            )
             if utterance.audio.size == 0:
                 continue
 
@@ -245,8 +261,20 @@ def main():
             sf.write(str(wav_in), utterance.audio, utterance.sample_rate)
 
             result = pipeline.run(
-                str(wav_in), str(wav_out), on_stage_start=on_stage_start, on_result=on_result
+                str(wav_in),
+                str(wav_out),
+                on_stage_start=on_stage_start,
+                on_result=on_result,
+                # docs/barge-in-design.md stage 2: skip LLM/TTS/storage
+                # entirely for a short utterance whose ASR result is a bare
+                # backchannel word -- duration_s is the same value already
+                # logged above (VAD's own segment length, not re-measured).
+                should_continue_after_asr=lambda text: not is_backchannel(text, duration_s),
             )
+            if result["skipped"]:
+                logger.info(f"[VAD] backchannel ignored: {result['user_text']!r}")
+                continue
+
             logger.info(
                 f"[timing] asr={result['asr_ms']}ms llm={result['llm_ms']}ms "
                 f"tts={result['tts_ms']}ms"

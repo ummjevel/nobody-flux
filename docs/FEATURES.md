@@ -38,10 +38,17 @@
   튜닝) — 버튼 누를 필요 없음. 마이크/환경마다 재튜닝이 필요하면 `scripts/_debug_vad_mic.py`로
   진단.
 - **끼어들기(barge-in)**: 다음 발화 감지 대기가 이번 턴 응답 재생 시작과 동시에 시작됨(재생이
-  끝날 때까지 기다리지 않음) — 응답 재생 중에 말을 시작하면 즉시 재생이 끊기고 그 발화가 다음
-  턴이 됨. `scripts/talk.py`의 `play_async`/`on_speech_start` 참고. 에코 제거(AEC)는 없음 —
-  스피커→마이크로 응답 소리가 새어 들어가 VAD가 오탐하는 환경에서는 자기 자신의 응답에 스스로
-  끼어드는 것처럼 보일 수 있음 (이 프로젝트의 WSL2/WSLg 패스스루 환경에서는 관측 안 됨).
+  끝날 때까지 기다리지 않음). `scripts/talk.py`의 `play_async`/`on_barge_in_confirmed` 참고.
+  에코 제거(AEC)는 없음 — 스피커→마이크로 응답 소리가 새어 들어가 VAD가 오탐하는 환경에서는
+  자기 자신의 응답에 스스로 끼어드는 것처럼 보일 수 있음 (이 프로젝트의 WSL2/WSLg 패스스루
+  환경에서는 관측 안 됨).
+  - **backchannel("어"/"응") 구분** (`docs/barge-in-design.md`): 2단계. ① 지연-정지 —
+    `vad.py`의 `barge_in_confirm_ms`(250ms) 동안 발화가 계속돼야 재생을 끊음, 짧은 맞장구는
+    보통 이 안에서 끝나서 재생이 안 끊김. ② 사후 어휘 판정 — `src/nobody_flux/backchannel.py`의
+    `is_backchannel()`이 ASR 결과·발화 길이를 보고 backchannel이면 `pipeline.py`의
+    `should_continue_after_asr` 훅으로 LLM/TTS/저장을 아예 스킵. 파라미터(`barge_in_confirm_ms`,
+    단어 목록)는 실측 전 추정치 — LiveKit Adaptive Interruption Handling 사례(216ms 중앙값)로
+    보정했지만 이 프로젝트 마이크로는 아직 검증 안 함.
 - `scripts/run_pipeline.py`: 기존 1회성 wav-in/wav-out CLI. 자동화 테스트, 프리셋 간 결정론적
   비교(같은 입력 wav로 latency/출력 비교)용으로 유지.
 
@@ -103,8 +110,8 @@
 
 ## 다음 단계로 제안하는 것 (구현 안 함, 우선순위 순 아님)
 
-- **barge-in과 backchannel(맞장구) 구분** (`docs/barge-in-design.md`): 지금은 "어"/"응" 같은
-  맞장구도 전부 barge-in으로 오인해서 응답 재생을 끊음. 설계 문서에 지연-정지(지속시간 기반
-  1차 필터) + 사후 어휘 판정(ASR 결과 기반 2차 필터) 2단계 방식으로 정리해둠 — 구현 전.
+- **barge-in/backchannel 파라미터 마이크 실측** (`docs/barge-in-design.md`): 구현은 됐지만
+  `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/`BACKCHANNEL_MAX_DURATION_S`는 아직 추정치.
+  `scripts/_debug_vad_mic.py`를 backchannel/barge-in 샘플 지속시간 실측용으로 확장할 것.
 - CM4 실기에서의 실측 (리서치 문서가 애초에 요구했던 전제 — "모델 선정보다 CM4 실측 PoC가
   선행되어야 함")

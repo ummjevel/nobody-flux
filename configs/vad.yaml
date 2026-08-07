@@ -19,3 +19,13 @@ min_speech_duration: 0.15
 max_speech_duration: 20.0
 pre_roll_ms: 300
 num_threads: 1
+
+# docs/barge-in-design.md's stage 1 (delayed-stop): how long speech has to
+# continue before talk.py treats it as a real interruption instead of
+# backchannel ("어", "응"). 250ms, recalibrated from an initial 400ms guess
+# against LiveKit's Adaptive Interruption Handling (216ms median duration to
+# decide, in production) -- see the design doc's "관련 연구" section. Not yet
+# validated against this project's own mic/room the way threshold above was
+# (scripts/_debug_vad_mic.py) -- re-run that kind of check if barge-in feels
+# too trigger-happy or too sluggish in practice.
+barge_in_confirm_ms: 250

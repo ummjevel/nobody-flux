@@ -36,6 +36,7 @@ class STSPipeline:
         wav_out: str,
         on_stage_start: Callable[[str], None] | None = None,
         on_result: Callable[[str, str, int], None] | None = None,
+        should_continue_after_asr: Callable[[str], bool] | None = None,
     ) -> dict:
         """One turn: transcribe wav_in, generate a reply, synthesize it to wav_out.
 
@@ -58,9 +59,18 @@ class STSPipeline:
         transcript (and how long it took) right after ASR instead of holding
         it until playback is about to start.
 
+        should_continue_after_asr: optional callback invoked with user_text
+        right after ASR; if it returns False, this returns immediately
+        (llm_text/tts_ms/wav_out all None, result["skipped"] = True)
+        without running the LLM or TTS stage at all. talk.py uses this for
+        docs/barge-in-design.md's stage 2 (post-hoc lexical backchannel
+        check) -- a short "어"/"응" shouldn't spend a full LLM+TTS call (and
+        shouldn't get logged as a real conversation turn) just because ASR
+        happened to transcribe it successfully.
+
         Neither callback is required; run_pipeline.py's single one-shot call
-        doesn't need live progress, so both stay optional rather than forcing
-        every caller to care.
+        doesn't need live progress, so all three stay optional rather than
+        forcing every caller to care.
         """
 
         def stage_start(stage: str) -> None:
@@ -77,6 +87,17 @@ class STSPipeline:
         t1 = time.perf_counter()
         asr_ms = round((t1 - t0) * 1000)
         result("asr", user_text, asr_ms)
+
+        if should_continue_after_asr is not None and not should_continue_after_asr(user_text):
+            return {
+                "user_text": user_text,
+                "reply_text": None,
+                "wav_out": None,
+                "asr_ms": asr_ms,
+                "llm_ms": None,
+                "tts_ms": None,
+                "skipped": True,
+            }
 
         stage_start("llm")
         reply_text = self.llm.reply(user_text)
@@ -95,6 +116,7 @@ class STSPipeline:
             "asr_ms": asr_ms,
             "llm_ms": llm_ms,
             "tts_ms": tts_ms,
+            "skipped": False,
         }
 
     def close(self) -> None:

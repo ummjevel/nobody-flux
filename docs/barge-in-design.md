@@ -1,9 +1,13 @@
 # barge-in vs backchannel 구분 설계 문서
 
-**상태: 설계만, 구현 없음.** `scripts/talk.py`의 barge-in(`play_async`/`on_speech_start`)은
-지금 TEN-VAD가 "말하기 시작함"을 감지하는 즉시 재생을 끊는다. 이 문서는 그중 진짜
-끼어들기(barge-in)와 맞장구(backchannel)를 구분해서, 맞장구에는 재생이 안 끊기게 만드는
-설계다.
+**상태: 구현됨.** 아래 "권장 설계"에 적힌 그대로 구현: `vad.py`의
+`barge_in_confirm_ms`/`on_barge_in_confirmed`(1단계, 지연-정지)와
+`src/nobody_flux/backchannel.py`의 `is_backchannel()`(2단계, 사후 어휘 판정) +
+`pipeline.py`의 `should_continue_after_asr` 훅으로 `talk.py`에 연결됨. 검증:
+`is_backchannel()` 단위 케이스(짧은 맞장구/길게 끄는 맞장구/맞장구로 시작하는 실제 문장 구분)
++ `pipeline.run()`이 backchannel 판정 시 LLM을 실제로 호출 안 하는지 end-to-end 확인 — 둘 다
+통과. 마이크 실사용 튜닝(파라미터 실측, "검증 계획" 절)은 아직 안 함 — 이 프로젝트 개발 환경
+(WSL2)에서 마이크 테스트 자체가 불안정하다는 기존 제약(`talk.py` 문서) 때문.
 
 ## 왜 문제가 되나
 
@@ -153,9 +157,12 @@ BACKCHANNEL_MAX_DURATION_S = 0.6
 
 ## 다음 단계
 
-- **했음**: 이 설계 문서, 관련 연구/업계 사례 조사
-- **다음 단계**: 위 "구현 위치"대로 vad.py/backchannel.py/talk.py 구현 → 마이크로 실측 →
-  파라미터 확정
+- **했음**: 이 설계 문서, 관련 연구/업계 사례 조사, vad.py/backchannel.py/pipeline.py/talk.py
+  구현, 단위 테스트 + end-to-end 스모크 테스트
+- **다음 단계**: 위 "검증 계획"대로 마이크로 실측(`scripts/_debug_vad_mic.py` 확장) →
+  `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/`BACKCHANNEL_MAX_DURATION_S` 파라미터 확정.
+  이 프로젝트 개발 환경(WSL2)에서 마이크 테스트가 불안정할 수 있어(`talk.py` 문서 참고),
+  H100 서버(네이티브 Linux)에서 시도할 것.
 - **더 나중에(스코프 밖, 참고용)**: 지속시간+어휘 휴리스틱으로도 부족하면, Krisp/LiveKit류
   소형 오디오 전용 분류기(수백만 파라미터, CPU에서 30ms 이내 추론) 도입을 고려. 다만 학습
   데이터 수집·훈련이 필요해서 이 프로젝트 지금 단계(프로토타입 검증)보다는 CM4 실기 검증
