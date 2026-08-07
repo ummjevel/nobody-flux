@@ -48,9 +48,17 @@
 ### 저장
 - `src/nobody_flux/storage.py`: SQLite (`data/conversations.db`, 커밋 안 됨).
   - `sessions`: talk.py 세션 단위
-  - `turns`: 매 턴의 user_text/reply_text, 사용된 프리셋, 스테이지별 소요시간(ms) — 나중에 여러
-    프리셋을 실측 비교할 때 그대로 쿼리해서 쓸 수 있음
+  - `turns`: 매 턴의 user_text/reply_text, 사용된 프리셋, 스테이지별 소요시간(ms)
   - `memories`: 스키마만 존재, 아직 아무것도 안 씀 (`docs/memory-design.md` 참고)
+
+### 벤치마크
+- `scripts/benchmark.py`: 고정 테스트셋(`--wav-dir`, 기본 `data/benchmark_wavs/`, 커밋 안 됨 —
+  직접 채워야 함)을 ASR×LLM×TTS 프리셋 조합마다 돌려서 스테이지별 평균 latency 표를 출력.
+  `--asr/--llm/--tts`로 특정 프리셋만 좁힐 수 있고, 생략하면 등록된 전체 프리셋의 카티전 곱을
+  돈다 (조합 수가 빠르게 커지니 주의). `--verbose`로 프리셋 조합별 user_text/reply_text도 같이
+  출력 — 품질은 사람이 읽고 판단해야 해서 자동 채점은 안 함. 내부적으로
+  `ConversationStore.turns_by_preset`/`turns_for_session`(둘 다 이 스크립트 전용으로 추가)이
+  `turns` 테이블을 집계.
 
 ### 환경 세팅
 - `scripts/setup_local.sh` (RTX 5090), `scripts/setup_server.sh` (H100) — 둘 다
@@ -63,8 +71,6 @@
   전사가 아님.
 - **다른 후보 모델의 실제 구현**: ASR(`vibeasr-bitnet`)과 TTS(`freyatts-ko-voicea`)는 두 번째
   프리셋이 붙었지만, LLM은 여전히 레지스트리 인프라만 있고 두 번째 구현은 없음.
-- **여러 프리셋 자동 비교 벤치마크 스크립트**: `turns` 테이블에 필요한 데이터(프리셋, ms)는
-  이미 쌓이므로, 이 데이터를 모아 표로 뽑는 스크립트를 추가하면 됨 — 아직 없음.
 - **기억 추출 로직**: 스키마만 있고 실제로 뽑아서 채우는 코드 없음.
 
 ## 프리셋 추가하는 법 (모델 스왑 확장)
@@ -83,8 +89,6 @@
 
 ## 다음 단계로 제안하는 것 (구현 안 함, 우선순위 순 아님)
 
-- 여러 프리셋을 순회하며 고정 테스트셋으로 latency/품질을 표로 뽑는 벤치마크 스크립트
-  (`turns` 테이블 데이터를 그대로 활용 가능 — 리서치 문서의 "다음 단계: 실측"과 직결됨)
 - 기억 추출 실제 구현 (`docs/memory-design.md`)
 - CM4 실기에서의 실측 (리서치 문서가 애초에 요구했던 전제 — "모델 선정보다 CM4 실측 PoC가
   선행되어야 함")

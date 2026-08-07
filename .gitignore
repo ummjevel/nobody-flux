@@ -38,6 +38,7 @@ external/
 data/*.wav
 data/voices/
 data/sessions/
+data/benchmark_wavs/
 data/*.db
 data/*.db-journal
 

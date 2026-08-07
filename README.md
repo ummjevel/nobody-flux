@@ -98,15 +98,17 @@ src/nobody_flux/
   persona.py               # 시스템 프롬프트 ("퀜" 페르소나)
   pipeline.py               # ASR→LLM→TTS 오케스트레이션 + 스테이지별 소요시간 계측
   registry.py               # configs/{models,voices}.yaml → 프리셋/음성 인스턴스 생성
-  vad.py                    # 에너지 기반 발화 구간 검출
+  vad.py                    # TEN-VAD 기반 발화 구간 검출
   storage.py                 # SQLite 대화 저장 (sessions/turns/memories)
 scripts/
-  talk.py                   # 연속 음성 루프 (마이크/스피커, 상시 프로세스)
+  talk.py                   # 연속 음성 루프 (마이크/스피커, 상시 프로세스, 끼어들기 지원)
   run_pipeline.py            # 1회성 wav-in/wav-out CLI
+  benchmark.py                # 고정 테스트셋으로 프리셋 조합별 latency 표 뽑기
   setup_local.sh / setup_server.sh / setup_common.sh
   env.sh                     # LD_LIBRARY_PATH 세팅 (source 필수)
 configs/models.yaml         # ASR/LLM/TTS 프리셋 정의
 configs/voices.yaml          # TTS 참조 음성(voice-clone) 프리셋 정의
+configs/vad.yaml             # VAD(TEN-VAD) 튜닝 파라미터
 docs/                        # 리서치, 기능 정의, 기억 설계 문서
 ```
 

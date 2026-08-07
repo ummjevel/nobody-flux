@@ -144,3 +144,36 @@ class ConversationStore:
                 ),
             )
             return cur.lastrowid
+
+    def turns_by_preset(self, session_id: int) -> list[tuple]:
+        """One row per distinct (asr_preset, llm_preset, tts_preset) combo
+        logged under session_id, with turn count and average per-stage ms --
+        the aggregation scripts/benchmark.py needs to turn a session's worth
+        of individual turns into a comparison table. Not needed by talk.py/
+        run_pipeline.py (they only ever log, never read back), which is why
+        this lives here instead of as a bare SQL string duplicated in
+        benchmark.py.
+        """
+        return self._conn.execute(
+            """
+            SELECT asr_preset, llm_preset, tts_preset,
+                   COUNT(*), AVG(asr_ms), AVG(llm_ms), AVG(tts_ms),
+                   AVG(asr_ms + llm_ms + tts_ms)
+            FROM turns
+            WHERE session_id = ?
+            GROUP BY asr_preset, llm_preset, tts_preset
+            ORDER BY AVG(asr_ms + llm_ms + tts_ms)
+            """,
+            (session_id,),
+        ).fetchall()
+
+    def turns_for_session(self, session_id: int) -> list[tuple]:
+        """Every turn logged under session_id, in order -- backs
+        scripts/benchmark.py's --verbose transcript listing."""
+        return self._conn.execute(
+            """
+            SELECT asr_preset, llm_preset, tts_preset, user_text, reply_text
+            FROM turns WHERE session_id = ? ORDER BY turn_index
+            """,
+            (session_id,),
+        ).fetchall()
