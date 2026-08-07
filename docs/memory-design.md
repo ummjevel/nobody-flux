@@ -89,7 +89,16 @@ recall 시 상한)를 그대로 구현하고, `scripts/talk.py`가 세션 종료
     반복 추출되는 경우 (예: "이름: 지수"를 다음 세션에서 또 언급) — SQL window function으로
     `(category, key)`별 최고 confidence/최신 행만 남기고 recall. `memories` 테이블 자체는
     안 지움 (읽을 때만 접는 뷰이지, 쓸 때 병합하는 게 아님) — 전체 이력은 그대로 남아있음.
-- **다음 단계**: 여러 세션에 걸쳐 실제로 써보면서 추출 품질(특히 `confidence` 값이 실제로
-  의미 있게 매겨지는지) 확인. `memories` 테이블이 무한정 커지는 것 자체는 아직 안 다룸 —
-  지금 스케일에서는 문제 안 될 가능성이 높지만, 오래 쓰면 오래된/낮은 confidence 행을
-  정리하는 게 필요해질 수 있음.
+- **Mem0식 consolidation** (`memory.py`의 `consolidate_memories`, arXiv 2504.19413 참고):
+  세션 종료 시 새로 뽑은 사실을 무조건 저장하는 게 아니라, 기존 저장된 기억과 비교해서
+  **ADD/UPDATE/NOOP** 중 하나로 처리 (`talk.py`가 적용). 이전의 "무조건 저장 + 읽을 때 dedup"
+  보다 테이블이 깔끔하고, 값이 바뀐 경우(예: "사는 곳: 서울" → "부산")를 UPDATE로 명시적으로
+  갱신함. 실측: qwen3-0.6b-gguf로도 "이름:지수(기존과 동일)→NOOP, 사는 곳:부산(변경)→UPDATE,
+  취미:등산(신규)→ADD"를 정확히 판정 (원샷 예시 프롬프트 덕분). **Mem0의 DELETE는 일부러 뺌**
+  — 0.6B가 구조화 출력에 불안정한데(추출 프롬프트도 원샷 예시가 필요했음) 잘못된 DELETE는
+  데이터를 되돌릴 수 없이 날리는 반면, 잘못된 ADD/UPDATE는 stale row로 남아 read-time dedup이
+  걸러낼 수 있어서. 파싱 실패 시 전부 ADD로 폴백 → consolidation은 개선만 하지 절대 퇴행 안 함.
+- **다음 단계**: 여러 세션에 걸쳐 실제로 써보면서 추출/consolidation 품질(특히 UPDATE 오판정,
+  `confidence` 값의 의미) 확인. `memories` 테이블이 무한정 커지는 문제는 UPDATE가 값 바뀐
+  경우는 잡아주지만, 완전히 다른 사실이 계속 쌓이는 건 여전 — 오래된/낮은 confidence 행 정리
+  로직은 아직 없음(지금 스케일에선 보류).

@@ -59,7 +59,7 @@ from loguru import logger
 from _cli import add_pipeline_args, build_pipeline_from_args
 from src.nobody_flux import registry
 from src.nobody_flux.backchannel import is_backchannel
-from src.nobody_flux.memory import extract_memories, format_recall_block
+from src.nobody_flux.memory import consolidate_memories, extract_memories, format_recall_block
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
 
@@ -342,10 +342,27 @@ def main():
                     )
                 ]
                 logger.info("[memory] extracting from this session...")
-                memories = extract_memories(pipeline.llm, session_turns)
-                for m in memories:
-                    store.save_memory(session_id, m["category"], m["key"], m["value"], m["confidence"])
-                logger.info(f"[memory] saved {len(memories)} fact(s)")
+                candidates = extract_memories(pipeline.llm, session_turns)
+                # Mem0-style consolidation: instead of blindly saving every
+                # candidate, diff against what's already stored and ADD/UPDATE/
+                # NOOP each one (memory.py). Falls back to all-ADD if the model
+                # output is unusable, so this can only tidy the table, never
+                # lose a fact.
+                existing = store.memories_for_consolidation()
+                ops = consolidate_memories(pipeline.llm, existing, candidates)
+                added = updated = skipped = 0
+                for op in ops:
+                    if op["op"] == "ADD":
+                        m = op["memory"]
+                        store.save_memory(session_id, m["category"], m["key"], m["value"], m["confidence"])
+                        added += 1
+                    elif op["op"] == "UPDATE":
+                        m = op["memory"]
+                        store.update_memory(op["target_id"], m["value"], m["confidence"])
+                        updated += 1
+                    else:
+                        skipped += 1
+                logger.info(f"[memory] added {added}, updated {updated}, skipped {skipped}")
             except Exception:
                 logger.exception("[memory] extraction failed, skipping")
 

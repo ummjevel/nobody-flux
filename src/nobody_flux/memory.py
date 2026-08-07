@@ -160,6 +160,141 @@ def extract_memories(llm, turns: list[tuple[str, str]]) -> list[dict]:
     return memories[:MAX_MEMORIES_PER_SESSION]
 
 
+# Mem0-style consolidation (arXiv 2504.19413): instead of always inserting a
+# freshly-extracted fact and leaning entirely on read-time dedup, each new fact
+# is compared against what's already stored and turned into an operation. This
+# implementation supports ADD / UPDATE / NOOP but deliberately NOT Mem0's
+# DELETE -- auto-deleting a stored memory on a 0.6B model's say-so is too risky
+# given how unreliable that model already is at structured output (see
+# EXTRACTION_SYSTEM_PROMPT's one-shot workaround), and a wrong DELETE loses data
+# irreversibly, whereas a wrong ADD/UPDATE just leaves a stale row that
+# recent_memories can still dedup past. See docs/memory-design.md.
+CONSOLIDATION_SYSTEM_PROMPT = """\
+너는 이미 저장된 기억과 새로 뽑은 사실을 비교해서, 새 사실 각각을 어떻게 처리할지 정하는
+도구야. 아래에 [기존 기억]과 [새 사실]이 번호와 함께 주어져.
+
+새 사실 각각에 대해 다음 중 하나를 정해:
+- ADD: 기존에 없는 새로운 정보다. 그대로 추가.
+- UPDATE N: 기존 기억 N번과 같은 항목인데 값이 바뀌었다(예: 사는 곳이 달라짐). N번을 갱신.
+- NOOP: 기존 기억에 이미 있는 내용이라 할 게 없다.
+
+새 사실 순서대로, 각 사실에 대한 처리를 JSON 배열로만 출력해. 설명/마크다운 없이 배열만.
+형식: [{"op": "ADD"}, {"op": "UPDATE", "target": 1}, {"op": "NOOP"}, ...]
+
+예시 입력:
+[기존 기억]
+0. 이름: 지수
+1. 사는 곳: 서울
+[새 사실]
+0. 이름: 지수
+1. 사는 곳: 부산
+2. 취미: 등산
+
+예시 출력:
+[{"op": "NOOP"}, {"op": "UPDATE", "target": 1}, {"op": "ADD"}]
+"""
+
+
+def _format_memory_list(header: str, memories: list[dict]) -> str:
+    lines = [f"[{header}]"]
+    for i, m in enumerate(memories):
+        lines.append(f"{i}. {m['key']}: {m['value']}")
+    return "\n".join(lines)
+
+
+def _parse_operations(raw_text: str, n_candidates: int, n_existing: int) -> list[dict] | None:
+    """Parse the consolidation LLM's op array. Returns a list of normalized
+    ops (one per candidate, in order) or None to signal "unusable output,
+    fall back." Same defensive stance as _extract_json_array: a 0.6B model
+    won't reliably emit exactly this shape, so anything off -> None and the
+    caller treats every candidate as a plain ADD (never worse than the
+    pre-consolidation behavior).
+
+    An individual op that's malformed (bad "op" string, or UPDATE with an
+    out-of-range/missing target) is downgraded to ADD rather than failing the
+    whole batch -- ADD is the safe default (keeps the fact, lets read-time
+    dedup sort out any redundancy). Only a wrong TOTAL count returns None,
+    since a length mismatch means we can't trust the op-to-candidate
+    alignment at all.
+    """
+    match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or len(parsed) != n_candidates:
+        return None
+
+    ops: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            ops.append({"op": "ADD"})
+            continue
+        op = item.get("op")
+        if op == "UPDATE":
+            target = item.get("target")
+            if isinstance(target, int) and not isinstance(target, bool) and 0 <= target < n_existing:
+                ops.append({"op": "UPDATE", "target": target})
+            else:
+                ops.append({"op": "ADD"})  # UPDATE with a bad target -> just add
+        elif op == "NOOP":
+            ops.append({"op": "NOOP"})
+        else:
+            ops.append({"op": "ADD"})  # "ADD" or anything unrecognized
+    return ops
+
+
+def consolidate_memories(llm, existing: list[dict], candidates: list[dict]) -> list[dict]:
+    """Decide, per candidate fact, whether to ADD / UPDATE an existing memory
+    / NOOP -- Mem0-style, but with a hard fallback for the 0.6B reliability
+    problem.
+
+    existing: current stored memories as dicts with at least id/key/value
+      (see ConversationStore.memories_for_consolidation).
+    candidates: freshly-extracted facts (extract_memories output).
+
+    Returns a list of resolved operations the caller applies to storage:
+      {"op": "ADD", "memory": <candidate dict>}
+      {"op": "UPDATE", "target_id": <existing id>, "memory": <candidate dict>}
+      {"op": "NOOP"}
+
+    Shortcuts without spending an LLM call: no candidates -> []; no existing
+    memories -> every candidate is an ADD (nothing to consolidate against).
+    Otherwise one generate_raw call; if its output is unusable
+    (_parse_operations returns None), every candidate falls back to ADD --
+    identical to the pre-consolidation behavior, so consolidation can only
+    help, never regress.
+    """
+    if not candidates:
+        return []
+    if not existing:
+        return [{"op": "ADD", "memory": c} for c in candidates]
+
+    prompt = (
+        _format_memory_list("기존 기억", existing)
+        + "\n"
+        + _format_memory_list("새 사실", candidates)
+    )
+    raw_text = llm.generate_raw(CONSOLIDATION_SYSTEM_PROMPT, prompt, max_new_tokens=256)
+    ops = _parse_operations(raw_text, len(candidates), len(existing))
+    if ops is None:
+        return [{"op": "ADD", "memory": c} for c in candidates]
+
+    resolved: list[dict] = []
+    for candidate, op in zip(candidates, ops):
+        if op["op"] == "UPDATE":
+            resolved.append(
+                {"op": "UPDATE", "target_id": existing[op["target"]]["id"], "memory": candidate}
+            )
+        elif op["op"] == "NOOP":
+            resolved.append({"op": "NOOP"})
+        else:
+            resolved.append({"op": "ADD", "memory": candidate})
+    return resolved
+
+
 def format_recall_block(memories: list[tuple]) -> str:
     """Renders ConversationStore.recent_memories()'s rows into the bullet
     block docs/memory-design.md's "다음 세션에 어떻게 반영할까" section

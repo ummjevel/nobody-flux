@@ -65,9 +65,11 @@
   - `memories`: 세션 종료 시 추출된 사실 (category/key/value/confidence)
 - `src/nobody_flux/memory.py` + `talk.py` 연결 (`docs/memory-design.md` 참고):
   - 세션 종료 시 그 세션의 모든 turns를 한 번에 LLM에 넣어 JSON 배열로 사실을 추출
-    (`extract_memories`) → `ConversationStore.save_memory`로 저장. 방어적 파싱(코드펜스/잡설이
-    섞여도 첫 `[`~마지막 `]` 구간만 파싱, 실패하면 빈 배열로 취급)과 세션당 상한
-    (`MAX_MEMORIES_PER_SESSION=10`)이 있음.
+    (`extract_memories`) → **Mem0식 consolidation**(`consolidate_memories`)으로 기존 기억과
+    비교해 ADD/UPDATE/NOOP 처리 → `save_memory`/`update_memory`로 반영. 무조건 저장이 아니라
+    값이 바뀐 건 UPDATE, 이미 있는 건 NOOP. 방어적 파싱(코드펜스/잡설이 섞여도 첫 `[`~마지막
+    `]` 구간만 파싱, 실패하면 전부 ADD로 폴백)과 세션당 상한(`MAX_MEMORIES_PER_SESSION=10`).
+    DELETE는 0.6B 신뢰도 문제로 일부러 뺌 (`docs/memory-design.md`).
   - 세션 시작 시 `ConversationStore.recent_memories()`(confidence·최신순 상위 10개)를
     `format_recall_block()`으로 불릿 리스트 텍스트로 만들어
     `NobodyLLM`/`NobodyLLMGguf`의 `system_prompt_suffix`에 주입 (persona의

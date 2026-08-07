@@ -239,3 +239,44 @@ class ConversationStore:
             """,
             (limit,),
         ).fetchall()
+
+    def memories_for_consolidation(self) -> list[dict]:
+        """The current canonical (deduped) memory set WITH row ids, for
+        memory.py's Mem0-style consolidation to diff a new session's facts
+        against. Same per-(category, key) dedup as recent_memories (so the
+        LLM sees one row per fact, not the full history), but returns dicts
+        with the winning row's id so an UPDATE op can target the exact row to
+        rewrite. Uncapped (unlike recent_memories' LIMIT) -- consolidation
+        should compare against everything known, not just the top-N that get
+        recalled into a prompt.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT id, category, key, value, confidence FROM (
+                SELECT id, category, key, value, confidence, created_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY category, key
+                           ORDER BY confidence IS NULL, confidence DESC, created_at DESC
+                       ) AS rn
+                FROM memories
+            )
+            WHERE rn = 1
+            ORDER BY confidence IS NULL, confidence DESC, created_at DESC
+            """
+        ).fetchall()
+        return [
+            {"id": r[0], "category": r[1], "key": r[2], "value": r[3], "confidence": r[4]}
+            for r in rows
+        ]
+
+    def update_memory(self, memory_id: int, value: str, confidence: float | None = None) -> None:
+        """Rewrite a stored memory's value/confidence in place (Mem0-style
+        UPDATE op). Also refreshes created_at, so the updated fact sorts as
+        the most recent for recent_memories' dedup/recency ordering -- an
+        UPDATE means "this is the current truth," which should win over any
+        older row for the same (category, key)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE memories SET value = ?, confidence = ?, created_at = ? WHERE id = ?",
+                (value, confidence, _now(), memory_id),
+            )
