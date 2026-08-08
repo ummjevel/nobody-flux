@@ -125,6 +125,10 @@
 
 ## 다음 단계로 제안하는 것 (구현 안 함, 우선순위 순 아님)
 
+- **TTS 표현력(한숨·숨·웃음 등 NVV)** (`docs/tts-expressivity-design.md`): Qwen3-TTS 증류가
+  딱딱해지는 근본 원인(표현력은 증류로 못 만듦) + 한국어 NVV 데이터 공백 + 두 갈래
+  (CosyVoice2/3 갖다쓰기 vs 한국어 NVV 데이터 파이프라인 자체 구축)를 정리. CosyVoice2
+  프리셋 프로토타입으로 실측 진행 중.
 - **barge-in/backchannel 파라미터 마이크 실측** (`docs/barge-in-design.md`): 구현은 됐지만
   `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/`BACKCHANNEL_MAX_DURATION_S`는 아직 추정치.
   `scripts/_debug_vad_mic.py`를 backchannel/barge-in 샘플 지속시간 실측용으로 확장할 것.
