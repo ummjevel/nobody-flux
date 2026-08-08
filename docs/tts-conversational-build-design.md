@@ -22,77 +22,96 @@
 않다(표현력 있는 Qwen3-TTS에서 증류돼 자연스러운 톤/쉼 확보). 즉 vanilla Matcha가 밋밋한 건
 아키텍처가 아니라 **낭독 데이터 + 결정론적 샘플링** 때문. 이 구분이 아래 선택을 가른다.
 
-## 2. 밋밋함을 푸는 레버 (전부 CPU에서 쌈)
+## 2. 밋밋함을 푸는 레버 — 실측으로 재정렬
 
-| 레버 | 원리 | CPU 비용 | 대화체 기여 |
-|---|---|---|---|
-| **스토캐스틱 duration 예측** | flow 기반 확률적 길이 (VITS 내장). 결정론적 대비 인간다운·다양한 리듬 | 거의 0(추론 시 샘플) | 리듬 변동성 — 큼 |
-| **스토캐스틱 pitch 예측** | F0도 확률적으로 (Glow-TTS 다양성 논문, arXiv:2305.17724) | 낮음 | 억양 변동성 |
-| **운율 latent 샘플링** | 운율을 회귀 대신 분포에서 샘플(소형 VAE/flow/DDPM prosody predictor; DiffStyleTTS 2412.03388, DDPM prosody 2305.16749) | 낮음~중 | 표현 다양성 — 큼 |
-| **문맥(대화 이력) 조건화** | 현재 발화 운율을 이전 턴 텍스트/음향에 조건 (FCTalker 2210.15360, M²-CTTS, CSM 사상) | 낮음(작은 인코더) | **대화 적절성 — 핵심** |
-| **자발적 스타일 모델링** | spontaneous 스타일 병목/전이(SponTTS 2311.07179), filled-pause 예측기(AdaSpeech3) | 낮음 | 자연스러운 멈춤·비유창성 |
-| **NVV 인라인 토큰** | `[웃음]`/`[한숨]` vocab 확장(NVSpeech 패턴) | 0 | 비언어 발성 |
+> **실측 반영(중요)**: 스토캐스틱 duration predictor(VITS SDP)를 켜고 테스트했으나 대화체
+> 표현력이 안 나왔다. 이건 문헌과도 일치한다 — VITS2 ablation에서 SDP vs 결정론적은 **MOS
+> 0.14 차이(미미)**, Casanova 등은 SDP가 **부자연스러운 길이 → 발음 불명확**을 유발한다고 보고,
+> 많은 후속 연구가 제어력 위해 **SDP를 다시 결정론적 예측기로 교체**했다. → **stochastic
+> duration은 답이 아니다.** 이유: (1) 타이밍(리듬) 한 축만 흔들 뿐 피치·에너지·전달 스타일은
+> 그대로 회귀로 뭉개짐, (2) "랜덤 분산 ≠ 맥락에 맞는 표현", (3) **결정타 — stochastic은 학습된
+> 분포에서 샘플할 뿐, 밋밋한 데이터로 학습했으면 분포 자체가 밋밋해서 샘플해도 밋밋하다.**
 
-핵심 통찰 두 가지:
-1. **VITS는 스토캐스틱 duration predictor를 구조적으로 갖고 있다** — Matcha/FastSpeech2가 밋밋한
-   바로 그 지점을 VITS는 설계상 회피. 그리고 VITS = Piper = CPU 실시간 검증됨.
-2. **대화체의 진짜 결정 요인은 아키텍처보다 데이터(자발적 대화 음성) + 문맥 조건화.** 아무리 좋은
-   아키텍처도 낭독 데이터로 학습하면 낭독체가 된다.
+그래서 레버를 영향력 순으로 다시 세운다:
 
-## 3. 권장 아키텍처 — 두 갈래
+| 순위 | 레버 | 원리 | 왜 이게 진짜 | CPU 비용 |
+|---|---|---|---|---|
+| **1** | **표현력 있는 데이터** | 자발적·대화·감정 음성으로 학습 | 학습 분포에 없는 표현력은 어떤 트릭으로도 못 만듦. stochastic이 안 된 근본 원인 | (데이터 작업) |
+| **2** | **운율을 조건부 분포로 모델링** | 음소단위 prosody latent을 **AR/flow prior**로 예측(arXiv:2211.01327), 또는 style-diffusion(StyleTTS2), DDPM prosody(2305.16749) | 회귀(평균 뭉갬) 대신 다봉분포를 실제로 학습. 여기서 도움되는 "AR"은 *오디오 토큰 AR*(비쌈)이 아니라 *prosody latent AR*(작고 쌈) | 낮음~중 |
+| **3** | **문맥(대화 이력) 조건화** | 이전 턴 텍스트/음향 → 현재 운율 조건 (FCTalker 2210.15360, M²-CTTS, CSM 사상) | "무작위 다양"이 아니라 "상황 적절" 운율 = 대화체의 정의 | 낮음 |
+| **4** | **자발적 스타일 모델링** | spontaneous 병목/전이(SponTTS 2311.07179), filled-pause 예측기(AdaSpeech3) | 멈춤·비유창성의 자연스러움 | 낮음 |
+| **5** | **NVV 인라인 토큰** | `[웃음]`/`[한숨]` vocab 확장(NVSpeech) | 비언어 발성 | 0 |
+| — | ~~스토캐스틱 duration/pitch~~ | ~~VITS SDP, 스토캐스틱 F0~~ | **강등: 미미하고 때로 해로움(위 실측)** — 켜도 되지만 표현력의 해법 아님 | 0 |
 
-### 갈래 A: VITS2-family 새로 구축 (스토캐스틱이 구조적)
+핵심 통찰(수정): **대화체 표현력은 stochastic 트릭이 아니라 (1) 데이터 + (2) 운율의 조건부
+분포를 제대로 모델링하는 것에서 나온다.** 아무리 좋은 아키텍처·샘플링도 낭독 데이터로 학습하면
+낭독체다.
 
-- **베이스**: VITS2 / Style-BERT-VITS2 계열. 스토캐스틱 duration + flow prior가 밋밋함을 구조적으로
-  방지. Piper(VITS)가 CM4급에서 실시간이니 CPU 적합성 검증됨. 한국어 생태계도 강함(MeloTTS-Korean,
-  Style-BERT-VITS2 KO).
-- **얹기**: (a) 스토캐스틱 pitch, (b) GST/스타일 임베딩(감정), (c) **대화 이력 인코더**(이전 턴 →
-  현재 운율 조건화), (d) NVV 토큰.
-- **장점**: 밋밋함 방지가 구조 내장 + CPU 최강 검증 + ONNX 성숙. **단점**: FreyaTTS가 이미 이룬
-  자연스러운 운율을 처음부터 다시 쌓아야 함.
+## 2b. 정직한 한계 (인정하고 가기)
 
-### 갈래 B: FreyaTTS(flow-matching) 유지·확장
+오늘 CPU-only에서 CSM/Dia/Orpheus급의 "완전히 살아있는" 대화체는 어렵다 — 그 느낌은 **오디오
+토큰 전체를 문맥 조건으로 autoregressive하게 모델링**하는 데서 오고, 그건 GPU(Orpheus-3B는 Q4
+에서도 ~8GB VRAM)다. CM4에서 현실적으로 노릴 수 있는 건:
+- (a) **표현력 있는 데이터 + 운율-latent prior + 문맥 조건화**로 소형 모델의 표현 상한을 최대한
+  끌어올리기 (야심찬 자체 구축, 불확실하지만 "내 것"). — 아래 권장.
+- (b) 디바이스는 "좋지만 CSM급은 아닌" TTS로 두고, 완전한 표현은 포기하거나 서버 연결 시에만.
+- (c) 하이브리드: 디바이스 기본 + 서버(큰 AR) 표현 — 단, 이 저장소의 "완전 로컬" 목표와 상충.
 
-- FreyaTTS는 **이미 밋밋하지 않다**(자연 톤/쉼 확보). 그러면 밋밋함 레버 중 필요한 건 스토캐스틱
-  운율 latent 정도이고, 나머지는 문맥 조건화 + NVV 토큰 + 발음 개선.
-- **장점**: 가장 어려운 자연 운율을 이미 가짐 → 최저 위험. **단점**: flow 위에 스토캐스틱 다양성·
-  문맥성을 얹는 건 VITS의 "공짜 스토캐스틱"보다 손이 더 감. 발음 문제도 병행 해결 필요.
+## 3. 권장 아키텍처 — 데이터·운율분포 중심으로 재정렬
 
-## 4. 어느 갈래? (판단)
+스토캐스틱이 답이 아니게 되면서 "VITS냐 flow냐"의 무게가 줄었다. 진짜 차별점은 **어느 베이스가
+(1) 표현력 있는 데이터로 학습됐고 (2) 운율의 조건부 분포(prosody-latent prior)를 제대로 모델링
+하며 (3) 문맥 조건화를 붙이기 쉬운가**이다. 아키텍처 자체보다 이 세 조건이 밋밋함을 가른다.
 
-- **밋밋함만 놓고 보면** VITS2가 구조적으로 유리(스토캐스틱 내장). 사용자의 "Matcha 단정적"
-  불만을 아키텍처 레벨에서 직접 해소.
-- **그러나 FreyaTTS는 이미 비-flat**이라, "밋밋함 해결"만을 이유로 FreyaTTS를 버리는 건 근거 약함.
-  FreyaTTS의 진짜 약점은 밋밋함이 아니라 **발음**이다.
-- **결정 요인은 결국 공통**: 자발적 대화 데이터 + 문맥 조건화 + NVV 토큰 — 이건 어느 베이스든
-  똑같이 해야 한다. 이 데이터/조건화 작업이 "내가 만드는 모델"의 실질 노력이자 자산.
+공통 코어(어느 베이스든 동일):
+- **표현력 있는 자발적 대화 한국어 데이터** (1순위 — 없으면 무엇도 안 됨).
+- **prosody-latent prior**: 음소단위 운율 latent을 AR/flow prior로 예측(arXiv:2211.01327) 또는
+  style-diffusion. "평균 뭉갬"을 실제 다봉분포 모델링으로 대체. (오디오토큰 AR 아님 → CPU 가능)
+- **대화 이력 조건화** + **NVV 토큰**.
 
-**권장**:
-- 소유·학습 가치를 중시하고 밋밋함을 구조로 확실히 잡고 싶다 → **갈래 A(VITS2-family)로 새로
-  구축.** Piper/Style-BERT-VITS2를 스캐폴드로, 위 얹기 4종 + 자발적 대화 데이터. 아키텍처가 대화체를
-  구조적으로 밀어줌.
-- 최단 경로로 쓸만한 결과를 원한다 → **갈래 B(FreyaTTS)** + 문맥 조건화 + NVV + 발음 개선.
-- 어느 쪽이든 **자발적 대화 한국어 데이터 + NVV 토큰 파이프라인**이 공통 선행 자산 → 여기부터
-  시작하는 게 낭비 없음.
+베이스 후보:
+- **FreyaTTS(flow) 유지**: 이미 비-flat(발음이 약점). 위 코어(데이터+prosody prior+문맥+NVV)를
+  얹고 발음(G2P) 별개 트랙. **최저 위험** — 자연 운율을 다시 안 쌓아도 됨.
+- **StyleTTS2-lite**: 운율 분포 모델링(style-diffusion)+pretrained SLM으로 표현력 상한 최고. 단
+  학습 불안정·스트리밍 없음·디퓨전 지연 → CM4 위험 큼.
+- **VITS2/Style-BERT-VITS2 새로**: CPU 검증 최강(Piper)·한국어 생태계 강함. 단 스토캐스틱은 이제
+  셀링포인트 아님 → 여기에도 prosody-latent prior를 별도로 얹어야 표현력 나옴. 자연 운율 처음부터.
 
-## 5. 최소 구축 레시피 (갈래 A 기준, 갈래 B도 3~5 공유)
+## 4. 판단
 
-1. **베이스 스캐폴드**: Style-BERT-VITS2(또는 MeloTTS-Korean) 한국어 체크포인트로 시작 —
-   스토캐스틱 duration + 스타일 임베딩 이미 있음. ONNX-CPU 경로 확인.
-2. **문맥 조건화 추가**: 이전 N턴(텍스트, 선택적으로 음향)을 작은 인코더로 요약해 현재 발화
-   조건에 주입 (FCTalker/M²-CTTS 식). 대화체의 핵심.
-3. **NVV 토큰**: `[웃음]`/`[한숨]`/`[숨]`을 음소셋에 추가 (NVSpeech 패턴).
-4. **데이터**: 자발적 한국어 대화 음성(AI-Hub, CoreaSpeech 700h) → NVV 인식 ASR 부트스트랩으로
-   자동 태깅 + 감정/스타일 라벨. 부족분은 CosyVoice3 서버 teacher로 NVV·감정 데이터 생성 +
-   VC/pitch 증강. **중립→표현 커리큘럼.**
-5. **발음(별개 트랙)**: 한국어 G2P/자소(JAMO) 처리 견고화 — FreyaTTS에도 공통 적용.
-6. **평가**: 운율 다양성 지표(arXiv:2509.19928) + NV-Bench(2603.15352) + 사람 청취. `benchmark.py`로
-   CPU latency.
+- **스토캐스틱 내장이 더 이상 VITS2 선택 이유가 못 됨**(실측·문헌). 그래서 "밋밋함 잡으려 VITS2"는
+  약해졌다.
+- FreyaTTS는 이미 비-flat이고 진짜 약점은 발음 → **밋밋함을 이유로 FreyaTTS를 버릴 근거 없음.**
+- **결정 요인은 베이스가 아니라 공통 코어**(표현 데이터 + prosody-latent prior + 문맥 + NVV). 이게
+  "내가 만드는 것"의 실질이자 자산.
+
+**권장**: 베이스는 **FreyaTTS 유지**(최저 위험)하고, 노력은 전부 공통 코어에 — 특히 **① 표현력
+있는 한국어 대화 데이터 확보, ② prosody-latent prior 도입**에 집중. 새 아키텍처(VITS2)로 갈아타도
+같은 코어를 해야 하므로, 자연 운율을 이미 가진 FreyaTTS 위에서 코어를 검증하는 게 낭비 없다.
+StyleTTS2 신규 구축은 CM4 리스크로 비권장.
+
+## 5. 최소 구축 레시피 (베이스: FreyaTTS 유지 권장, 순서 = 영향력 순)
+
+1. **데이터 먼저**: 표현력 있는 자발적 한국어 대화 음성 확보 — AI-Hub 대화/감정, CoreaSpeech 700h,
+   방송/팟캐스트/잡담. NVV 인식 ASR 부트스트랩으로 `[웃음]`/`[한숨]` 자동 태깅 + 감정/스타일 라벨.
+   부족분만 CosyVoice3 서버 teacher로 NVV·감정 데이터 생성 + VC/pitch 증강. **이게 1순위 — 데이터
+   없이는 아래가 다 무의미.** 소규모라도 먼저 확보해 "밋밋한 분포" 문제부터 깬다.
+2. **prosody-latent prior 도입**: 운율(피치/에너지/타이밍)을 회귀로 예측하지 말고, 음소단위 운율
+   latent을 **AR 또는 flow prior로 예측**(arXiv:2211.01327)해 다봉분포를 학습. 이게 stochastic
+   duration보다 훨씬 본질적인 "밋밋함 해소". 추론은 작은 prior 샘플이라 CPU 가능.
+3. **문맥 조건화**: 이전 N턴(텍스트, 선택 음향)을 작은 인코더로 요약해 현재 운율에 조건
+   (FCTalker/M²-CTTS). "상황 적절" 운율 = 대화체.
+4. **NVV 토큰**: `[웃음]`/`[한숨]`/`[숨]`을 음소셋에 추가 (NVSpeech 패턴). 1의 데이터로 학습.
+5. **발음(별개 트랙)**: 한국어 G2P/자소(JAMO) 견고화 — FreyaTTS의 실제 약점.
+6. **평가**: 운율 다양성 지표(arXiv:2509.19928) + NV-Bench(2603.15352) + 사람 청취(A/B). `benchmark.py`
+   로 CPU latency. **stochastic on/off가 아니라 "데이터+prior 넣기 전/후"로 A/B** 해야 실제 효과 보임.
 
 ## 6. 참고 문헌
 
 - 진단: [Over-Smoothness in TTS(2202.13066)](https://arxiv.org/pdf/2202.13066) · [운율 다양성 지표(2509.19928)](https://arxiv.org/html/2509.19928v3)
-- 스토캐스틱 운율: [VITS(stochastic duration)] · [Stochastic pitch/Glow-TTS(2305.17724)](https://arxiv.org/pdf/2305.17724) · [DiffStyleTTS(2412.03388)](https://arxiv.org/pdf/2412.03388) · [DDPM prosody(2305.16749)](https://arxiv.org/pdf/2305.16749) · [Apple hierarchical prosody NAR](https://machinelearning.apple.com/research/hierarchical-prosody-modeling)
+- stochastic 한계(실측 뒷받침): [VITS2 ablation(2307.16430)](https://arxiv.org/pdf/2307.16430) (SDP vs 결정론 MOS 0.14) · SDP 부작용(Casanova 등) → 후속 연구 결정론 회귀
+- **운율 조건부 분포 모델링(핵심)**: [음소단위 prosody latent AR/flow prior(2211.01327)](https://arxiv.org/pdf/2211.01327) · [DiffStyleTTS(2412.03388)](https://arxiv.org/pdf/2412.03388) · [DDPM prosody(2305.16749)](https://arxiv.org/pdf/2305.16749) · [Apple hierarchical prosody NAR](https://machinelearning.apple.com/research/hierarchical-prosody-modeling) · [Stochastic pitch/Glow-TTS(2305.17724)](https://arxiv.org/pdf/2305.17724)
+- AR vs NAR·CPU 한계: [저자원 표현 NAR(Amazon 2106.12896)](https://arxiv.org/pdf/2106.12896) · [ZipVoice-Dialog NAR flow(2507.09318)](https://arxiv.org/pdf/2507.09318) · Orpheus-3B Q4 ~8GB VRAM(GPU 전용, CM4 불가)
 - 대화 문맥: [FCTalker(2210.15360)](https://arxiv.org/pdf/2210.15360) · [RADKA-CSS(2501.06467)](https://arxiv.org/pdf/2501.06467) · [Conversational E2E TTS(2005.10438)](https://arxiv.org/pdf/2005.10438) · [Sesame CSM 블로그](https://www.sesame.com/blog/crossing-the-uncanny-valley-of-voice)
 - 자발적 스타일: [SponTTS(2311.07179)](https://arxiv.org/pdf/2311.07179) · [ChatTTS](https://github.com/2noise/ChatTTS)
 - 베이스: [Style-BERT-VITS2 표현 평가(2505.17320)](https://arxiv.org/html/2505.17320v1) · [MeloTTS-Korean](https://huggingface.co/myshell-ai/MeloTTS-Korean)
