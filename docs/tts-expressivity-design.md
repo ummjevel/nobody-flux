@@ -119,6 +119,13 @@ CosyVoice2도 이 로컬 박스(RTX 5090 sm_120 vs torch cu121)에선 GPU가 안
 디바이스 TTS는 경량 CPU 모델(현재 `sherpa-matcha-ko`) 축을 유지한다. 표현력은 "디바이스에
 큰 모델을 올리는" 문제가 아니라 "작은 CPU 모델에 어떻게 NVV를 넣느냐" 문제로 본다.
 
+구체적인 모델 지형·표현력 기법·아키텍처·데이터 전략과 "FreyaTTS에 얹기 vs 새로 만들기" 판단은
+후속 리서치 문서 `docs/tts-small-expressive-research.md` 참고. 요지: **FreyaTTS(flow-matching)에
+얹는 게 최저 위험 정답**(이미 자연스러운 운율 확보 + flow field 위 표현력은 가산적 + CPU/ONNX/
+스트리밍 친화). 레시피 = 인라인 NVV 토큰(NVSpeech 패턴) + 경량 조건화(GST + FastSpeech2 variance
+adaptor) + CosyVoice3 teacher로 데이터 생성 + NVV-ASR 부트스트랩 + 커리큘럼 학습, 발음은 G2P로
+별개 트랙. StyleTTS2 신규 구축은 학습 불안정·스트리밍 없음으로 비권장.
+
 1. **보류(현재)**: CosyVoice2 한국어 NVV 실측은 서버(H100) 작업으로 미룸 — 로컬 RTX 5090
    불가 + 이 저장소(디바이스 전용)엔 대형 GPU TTS를 프리셋으로 넣지 않기로. (실측 시엔 서버에서
    `git clone --recursive FunAudioLLM/CosyVoice` → `inference_cross_lingual('...[laughter]...',
