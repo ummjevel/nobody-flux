@@ -106,6 +106,61 @@ StyleTTS2 신규 구축은 CM4 리스크로 비권장.
 6. **평가**: 운율 다양성 지표(arXiv:2509.19928) + NV-Bench(2603.15352) + 사람 청취(A/B). `benchmark.py`
    로 CPU latency. **stochastic on/off가 아니라 "데이터+prior 넣기 전/후"로 A/B** 해야 실제 효과 보임.
 
+## 5b. 실측 교훈 & 학습/프론트엔드 노트 (세션 정리)
+
+이 프로젝트에서 실제로 부딪혀 확인한 것들. **모델을 갈아타기 전에 이걸 먼저 보라.**
+
+**표현력·밋밋함**
+- Qwen3-TTS 벌크 증류 → 화자 5명 다 딱딱. **표현력은 증류로 못 만듦**(teacher 천장 복제).
+- VITS **stochastic duration 켜도 대화체 안 됨**(실측). 문헌 일치(VITS2 ablation MOS 0.14, SDP
+  발음 부작용 → 후속 연구 결정론 회귀). → stochastic은 답 아님.
+- 진짜 원인 = 회귀손실 평균뭉갬 + 결정론적 운율 + 낭독 데이터. 진짜 레버 순위 = **데이터 >
+  운율 조건부 분포(prosody-latent prior) > 문맥 조건화.** stochastic 아님.
+- **flat ≠ flow-matching.** FreyaTTS(flow)는 안 밋밋(발음이 약점). vanilla Matcha가 밋밋한 건
+  데이터/결정론 탓.
+
+**음질 디버깅 (금속성/먹먹)**
+- ZipVoice from-scratch/AI-Hub(24kHz, 500h+) → 잡음/먹먹/금속성. **데이터 양 문제 아님**(500h 충분).
+- 금속성 = acoustic↔보코더↔SR 체인 문제. **copy-synthesis(GT→피처→보코더→wav)로 분기**:
+  금속성이면 보코더/피처설정, 깨끗하면 acoustic. **acoustic 파인튠 전에 이걸 먼저 하라**(보코더가
+  원인이면 파인튠해도 안 고쳐짐).
+- 보코더 피처설정(n_mels/n_fft/hop/fmin/fmax/sr)을 acoustic과 **완전 일치** 확인.
+- from-scratch보다 **사전학습 fine-tune이 금속성에 강함**(깨끗한 음향 렌더링이 언어 불문 전이).
+
+**파인튠·프리트레인 재사용**
+- **프리트레인 못 쓰는 거 아님.** 웨이트 대부분(인코더+flow 디코더=음향 능력)이 vocab 무관하게
+  그대로 로드됨 — 그게 금속성 해결의 핵심 부분.
+- vocab 확장 = 리사이즈 **append**(기존 행 복사 + 새 행만 init). 한국어 토큰은 **맨 뒤에 append**
+  (중간 삽입 금지, ID 밀림 방지). TTS는 **출력 vocab 없음**(연속 음향 출력) → 입력 임베딩만 손봄.
+- 입력 스킴을 바꿔도(음소→자모/바이트) **음향 디코더는 전이** → from-scratch 회귀 아님. 텍스트
+  인코더만 재학습.
+
+**멀티링구얼**
+- 유지하려면 **replay**(영/중/한 혼합 학습), 혼합 **비율** 관리가 곧 "비율 깨짐" 대응. 한국어 단일
+  목표면 영/중 망각은 **손해가 아니라 이득**.
+- ZipVoice 베이스가 이미 영/중 멀티 → 한국어 얹으며 영/중 replay가 "처음부터 멀티"보다 쉬움.
+
+**프론트엔드 (eSpeak 회피)**
+- eSpeak-ng: 한국어 규칙 약함 + **GPL-3.0** + C 의존성 → 피하고 싶은 이유 정당.
+- 대안: **g2pK→jamo**(발음↑·무의존성·라이선스 깨끗, **추천**) / 자모만(무의존성, 규칙은 데이터로)
+  / byte·BPE(멀티링구얼 균일·G2P 제거, 데이터 더 필요).
+- ZipVoice는 언어별 토크나이저 교체 구조(`EspeakTokenizer` 등) → 한국어 토크나이저 새로 꽂기 자연스러움.
+
+**최근 참고 (2026)**
+- **ZipVoice/ZipVoice-Dialog**(k2-fsa, 123M flow, base는 CPU near-RT, 우리 sherpa-onnx와 같은 생태계):
+  대화 레시피 = monologue 사전학습 → dialogue 파인튠 커리큘럼 + speaker-turn 임베딩 + `[S1][S2]`
+  interleaved. (한국어·NVV 없음, dialog 벤치는 GPU → 드롭인 아니라 **레시피 각색용**.)
+- **SwanVoice**(2605.30993): monologue+dialogue 표현 zero-shot 장문. **dots.tts**(2606.07080, 2B,
+  서버): 의미계획(LLM)↔음향렌더(flow head) 분리. **Voxtral**(390M flow, prompt에서 운율 추론).
+  **Kitten**(24MB, 범주 감정 보이스).
+
+**현재 권장 (종합)**
+- 베이스: **FreyaTTS 유지**(비-flat, 최저 위험). 노력은 공통 코어에 — ① 표현력 있는 한국어 대화
+  데이터 ② prosody-latent prior ③ 문맥 조건화 ④ NVV 인라인 토큰. **발음은 g2pK로 별개 트랙.**
+- 큰 표현 모델(CosyVoice3/CSM/Dia/Orpheus)은 디바이스 아님 → **서버 데이터 생성 teacher**로만.
+- 다음 착수 후보: (a) copy-synthesis로 금속성 원인 분기, (b) 표현력 있는 한국어 대화 데이터 소싱,
+  (c) g2pK→jamo 프론트엔드 PoC, (d) prosody-latent prior 설계.
+
 ## 6. 참고 문헌
 
 - 진단: [Over-Smoothness in TTS(2202.13066)](https://arxiv.org/pdf/2202.13066) · [운율 다양성 지표(2509.19928)](https://arxiv.org/html/2509.19928v3)
