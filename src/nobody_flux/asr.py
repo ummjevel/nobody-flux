@@ -21,36 +21,47 @@ from pathlib import Path
 from ._procio import LineReader, StderrDrainer, clean_subprocess_env
 from .paths import PROJECT_ROOT
 
-# sherpa-onnx's compiled extension dlopen()s a bare "libonnxruntime.so"
-# (Linux) / "libonnxruntime.dylib" (macOS), but the onnxruntime pip wheel only
-# ships a versioned file (Linux: libonnxruntime.so.1.27.0; macOS:
-# libonnxruntime.1.27.0.dylib) -- without a same-directory unversioned symlink
-# `import sherpa_onnx` can fail with a missing-shared-object error. This creates
-# that symlink if missing.
+# sherpa-onnx's compiled extension links against onnxruntime's shared library,
+# but the pip onnxruntime wheel ships it under onnxruntime/capi/ with a name and
+# in a location that sherpa-onnx's linker search doesn't find on its own. The
+# fix differs by OS (both confirmed by hand):
 #
-# On Linux there's a second half the process can't fix from here: glibc's
-# dynamic linker parses LD_LIBRARY_PATH once at process startup, so setting
-# os.environ after startup does NOT help -- LD_LIBRARY_PATH must be set in the
-# shell before python/uv run launches (see scripts/env.sh). macOS's sherpa-onnx
-# wheel usually self-locates its onnxruntime and needs neither the symlink nor
-# DYLD_LIBRARY_PATH, so the block below is best-effort there (a no-op if the
-# glob finds nothing) and won't raise.
-if platform.system() == "Darwin":
-    _ORT_VERSIONED_GLOB = "libonnxruntime.*.dylib"  # e.g. libonnxruntime.1.27.0.dylib
-    _ORT_UNVERSIONED = "libonnxruntime.dylib"
-else:
-    _ORT_VERSIONED_GLOB = "libonnxruntime.so.*"  # e.g. libonnxruntime.so.1.27.0
-    _ORT_UNVERSIONED = "libonnxruntime.so"
+#   Linux: the extension dlopen()s a bare "libonnxruntime.so", but the wheel only
+#   ships versioned "libonnxruntime.so.1.27.0". We symlink the bare name next to
+#   it, AND scripts/env.sh must put that dir on LD_LIBRARY_PATH before launch
+#   (glibc reads LD_LIBRARY_PATH once at startup, so os.environ here is too late).
+#
+#   macOS: the extension references "@rpath/libonnxruntime.<ver>.dylib" (versioned)
+#   and searches its OWN dir (sherpa_onnx/lib/), NOT onnxruntime/capi/ where the
+#   real dylib lives. DYLD_LIBRARY_PATH is unreliable (SIP strips it), so we
+#   symlink the real versioned dylib INTO sherpa_onnx/lib/ where @rpath looks.
+_SITE_PKGS = str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages")
 
-for _versioned in glob.glob(
-    str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages" / "onnxruntime" / "capi" / _ORT_VERSIONED_GLOB)
-):
-    _unversioned = os.path.join(os.path.dirname(_versioned), _ORT_UNVERSIONED)
-    if not os.path.exists(_unversioned):
-        try:
-            os.symlink(os.path.basename(_versioned), _unversioned)
-        except OSError:
-            pass  # read-only site-packages, race, etc. -- import may still succeed
+if platform.system() == "Darwin":
+    # onnxruntime dylib can sit in capi/ or elsewhere under the package -- search
+    # the whole onnxruntime tree, then link each into every sherpa_onnx/lib dir.
+    _ort_dylibs = glob.glob(
+        os.path.join(_SITE_PKGS, "onnxruntime", "**", "libonnxruntime.*.dylib"), recursive=True
+    )
+    _sherpa_libdirs = glob.glob(os.path.join(_SITE_PKGS, "sherpa_onnx", "lib"))
+    for _src in _ort_dylibs:
+        for _libdir in _sherpa_libdirs:
+            _dst = os.path.join(_libdir, os.path.basename(_src))
+            if not os.path.exists(_dst):
+                try:
+                    os.symlink(_src, _dst)  # absolute symlink to the real dylib
+                except OSError:
+                    pass
+else:
+    for _versioned in glob.glob(
+        os.path.join(_SITE_PKGS, "onnxruntime", "capi", "libonnxruntime.so.*")
+    ):
+        _unversioned = os.path.join(os.path.dirname(_versioned), "libonnxruntime.so")
+        if not os.path.exists(_unversioned):
+            try:
+                os.symlink(os.path.basename(_versioned), _unversioned)
+            except OSError:
+                pass  # read-only site-packages, race, etc. -- import may still succeed
 
 import numpy as np  # noqa: E402
 import sherpa_onnx  # noqa: E402 -- Linux needs LD_LIBRARY_PATH set first (see above)
