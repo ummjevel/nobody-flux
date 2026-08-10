@@ -151,6 +151,15 @@ def main():
         "mid-thought pause). Off by default -- the real-time accumulation loop is "
         "not yet mic-validated (see vad.py's listen_for_utterance docstring).",
     )
+    parser.add_argument(
+        "--no-barge-in",
+        action="store_true",
+        help="sequential mode: play each reply to completion BEFORE listening, "
+        "instead of listening during playback. Disables barge-in, but avoids "
+        "opening a playback stream and a mic stream at the same time -- which on "
+        "macOS/CoreAudio conflicts (PaMacCore err -50) and corrupts mic capture. "
+        "Use this to get a clean turn on a Mac until real AEC/duplex handling lands.",
+    )
     args = parser.parse_args()
 
     logger.info("Loading models...")
@@ -242,17 +251,24 @@ def main():
     turn_index = 0
     try:
         while True:
+            # Sequential mode (--no-barge-in): wait for the reply/greeting to
+            # finish playing BEFORE opening the mic, so a playback stream and a
+            # mic stream are never open at once. Avoids the macOS/CoreAudio
+            # duplex conflict (err -50) that corrupts capture. Costs barge-in.
+            if args.no_barge_in and playback_thread is not None:
+                playback_thread.join()
+
             logger.info("... listening ...")
-            # Deliberately starts before playback_thread (the previous
-            # turn's reply, or the greeting) has necessarily finished --
-            # that overlap is what makes barge-in possible. on_barge_in_confirmed
-            # is what actually cuts the still-playing clip off (once
-            # confirmed real, not on the first frame); this call blocks
-            # until an utterance completes either way, so by the time it
-            # returns playback has always stopped one way or another.
+            # In the default (barge-in) mode this deliberately starts before
+            # playback_thread (the previous reply, or the greeting) has finished
+            # -- that overlap is what makes barge-in possible.
+            # on_barge_in_confirmed cuts the still-playing clip off (once
+            # confirmed real). This call blocks until an utterance completes
+            # either way. In --no-barge-in mode nothing is playing by now, so
+            # the barge-in callback is passed as None.
             utterance = vad.listen_for_utterance(
                 on_speech_start=on_speech_start,
-                on_barge_in_confirmed=on_barge_in_confirmed,
+                on_barge_in_confirmed=None if args.no_barge_in else on_barge_in_confirmed,
                 turn_detector=turn_detector,
             )
             if utterance.audio.size == 0:
