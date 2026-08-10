@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import glob
 import os
+import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,26 +21,39 @@ from pathlib import Path
 from ._procio import LineReader, StderrDrainer, clean_subprocess_env
 from .paths import PROJECT_ROOT
 
-# sherpa-onnx's compiled extension dlopen()s a bare "libonnxruntime.so", but the
-# onnxruntime pip wheel only ships the versioned "libonnxruntime.so.1.27.0" --
-# without a same-directory unversioned symlink, `import sherpa_onnx` raises
-# "ImportError: libonnxruntime.so: cannot open shared object file".
-# This creates that symlink if missing, but can't fix the other half of the
-# problem from inside the process: glibc's dynamic linker parses
-# LD_LIBRARY_PATH once at process startup, so setting os.environ here (after
-# startup) does NOT make the linker search this directory -- LD_LIBRARY_PATH
-# must be set in the shell before `python`/`uv run` launches. See
-# scripts/env.sh (source it, or `export $(cat scripts/env.sh | ...)`-style use)
-# and the project README.
+# sherpa-onnx's compiled extension dlopen()s a bare "libonnxruntime.so"
+# (Linux) / "libonnxruntime.dylib" (macOS), but the onnxruntime pip wheel only
+# ships a versioned file (Linux: libonnxruntime.so.1.27.0; macOS:
+# libonnxruntime.1.27.0.dylib) -- without a same-directory unversioned symlink
+# `import sherpa_onnx` can fail with a missing-shared-object error. This creates
+# that symlink if missing.
+#
+# On Linux there's a second half the process can't fix from here: glibc's
+# dynamic linker parses LD_LIBRARY_PATH once at process startup, so setting
+# os.environ after startup does NOT help -- LD_LIBRARY_PATH must be set in the
+# shell before python/uv run launches (see scripts/env.sh). macOS's sherpa-onnx
+# wheel usually self-locates its onnxruntime and needs neither the symlink nor
+# DYLD_LIBRARY_PATH, so the block below is best-effort there (a no-op if the
+# glob finds nothing) and won't raise.
+if platform.system() == "Darwin":
+    _ORT_VERSIONED_GLOB = "libonnxruntime.*.dylib"  # e.g. libonnxruntime.1.27.0.dylib
+    _ORT_UNVERSIONED = "libonnxruntime.dylib"
+else:
+    _ORT_VERSIONED_GLOB = "libonnxruntime.so.*"  # e.g. libonnxruntime.so.1.27.0
+    _ORT_UNVERSIONED = "libonnxruntime.so"
+
 for _versioned in glob.glob(
-    str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages" / "onnxruntime" / "capi" / "libonnxruntime.so.*")
+    str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages" / "onnxruntime" / "capi" / _ORT_VERSIONED_GLOB)
 ):
-    _unversioned = os.path.join(str(Path(_versioned).parent), "libonnxruntime.so")
+    _unversioned = os.path.join(os.path.dirname(_versioned), _ORT_UNVERSIONED)
     if not os.path.exists(_unversioned):
-        os.symlink(os.path.basename(_versioned), _unversioned)
+        try:
+            os.symlink(os.path.basename(_versioned), _unversioned)
+        except OSError:
+            pass  # read-only site-packages, race, etc. -- import may still succeed
 
 import numpy as np  # noqa: E402
-import sherpa_onnx  # noqa: E402 -- needs LD_LIBRARY_PATH set (see above) before this import
+import sherpa_onnx  # noqa: E402 -- Linux needs LD_LIBRARY_PATH set first (see above)
 import soundfile as sf  # noqa: E402
 
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "sense-voice"

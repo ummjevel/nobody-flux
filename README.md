@@ -34,11 +34,21 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 
 # 서버 (H100)
 ./scripts/setup_server.sh
+
+# macOS (Apple Silicon/Intel) — CPU/ONNX 기본 파이프라인만
+bash scripts/setup_mac.sh
 ```
 
-두 스크립트 모두 `scripts/setup_common.sh`를 공유하며 다음을 처리한다: `uv sync`, GPU
-인식 확인, SenseVoice ASR 모델 자산 다운로드, MOSS-TTS-Nano를 `external/`에 클론하고
-**독립된 venv**를 만들어줌 (이유는 아래 "알려진 제약" 참고).
+`setup_local.sh`/`setup_server.sh`는 `scripts/setup_common.sh`를 공유하며 다음을 처리한다:
+`uv sync`, GPU 인식 확인, SenseVoice ASR 모델 자산 다운로드, MOSS-TTS-Nano를 `external/`에
+클론하고 **독립된 venv**를 만들어줌 (이유는 아래 "알려진 제약" 참고).
+
+**macOS**: `scripts/setup_mac.sh`는 CPU/ONNX 기본 프리셋(sense-voice-small / qwen3-0.6b-gguf /
+sherpa-matcha-ko)만 세팅한다. CUDA 전용 프리셋(freyatts-ko-voicea, moss-tts-nano)과 VibeASR.cpp
+빌드는 건너뛴다. 기본 LLM은 Apple Silicon에서 Metal 가속되고(GGUF), raw-transformers 프리셋은
+MPS를 자동 사용한다. 마이크(`sounddevice`)가 macOS에선 네이티브로 동작해서 **WSL2에서 못 하던
+실시간 barge-in/VAD/endpoint 테스트를 실제로 할 수 있다.** (아직 실기 검증은 안 됨 — 의존성 휠
+지원 기반 예측.) macOS에선 보통 `source scripts/env.sh` 불필요(안 되면 그때만).
 
 TTS의 voice-clone 참조 음성이 필요하다 — 저장소에 포함돼 있지 않으니 직접 준비해서 둘 것
 (개인 음성 녹음이라 공개 레포에 커밋 안 함, `.gitignore` 참고). 두 가지 방법:

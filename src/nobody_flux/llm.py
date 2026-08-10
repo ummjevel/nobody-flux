@@ -20,10 +20,26 @@ from .persona import SYSTEM_PROMPT
 DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 
 
+def _default_device() -> str:
+    """cuda (Nvidia) > mps (Apple Silicon) > cpu. Picked once at import; a
+    preset can still override via the `device` field. mps lets the raw-
+    transformers presets use the GPU on a MacBook instead of falling all the
+    way back to cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+_DEFAULT_DEVICE = _default_device()
+
+
 @dataclass
 class NobodyLLM:
     model_id: str = DEFAULT_MODEL_ID
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    device: str = _DEFAULT_DEVICE
     max_new_tokens: int = 96
     # Each stored turn is re-sent to the model (no cross-call KV cache -- see
     # reply() below), so an unbounded history means both re-encoding cost and
@@ -180,6 +196,11 @@ class NobodyLLMGguf:
     tokenizer_id: str = DEFAULT_MODEL_ID
     n_ctx: int = 4096
     n_threads: int = 8
+    # 0 = CPU only (default, works everywhere incl. CM4). On Apple Silicon set
+    # to -1 (offload all layers) to use Metal via llama.cpp's Metal backend --
+    # the pip wheel for macOS ships it. Left at 0 by default so the CM4/CPU
+    # target and Linux boxes are unaffected; it's a per-preset opt-in.
+    n_gpu_layers: int = 0
     max_new_tokens: int = 96
     max_history_turns: int = 6
     history: list[dict] = field(default_factory=list)
@@ -193,6 +214,7 @@ class NobodyLLMGguf:
             model_path=str(self.model_path),
             n_ctx=self.n_ctx,
             n_threads=self.n_threads,
+            n_gpu_layers=self.n_gpu_layers,
             verbose=False,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_id)
