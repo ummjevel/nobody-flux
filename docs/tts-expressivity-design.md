@@ -1,4 +1,9 @@
-# TTS 표현력(paralinguistic) 설계 문서
+# TTS 표현력(paralinguistic) 설계 — 전략
+
+> **TTS 문서 3부작 — 이 문서 = ① 전략.**
+> ① `tts-expressivity-design.md` — 전략(온디바이스 제약·Path A/B·한국어 NVV 데이터 공백) ← 여기
+> ② `tts-small-expressive-research.md` — 소형 표현력 TTS 모델·기법 서베이(참고)
+> ③ `tts-conversational-build-design.md` — 대화체 소형 TTS 구축 설계 + 실측 교훈(가장 구체적 "어떻게")
 
 **상태: 설계/조사.** 이 문서는 "대화다운 TTS"(한숨·숨소리·웃음 같은 비언어 발성 =
 non-verbal vocalization, NVV)를 **온디바이스(CM4, GPU 없음) 전용**이라는 이 저장소의 목적

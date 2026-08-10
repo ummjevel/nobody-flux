@@ -1,9 +1,13 @@
 # 작은데 표현력 좋은 TTS — 모델·기법·아키텍처 리서치 (참고용)
 
-전략 문서 `docs/tts-expressivity-design.md`의 후속 참고 자료. "온디바이스(CM4, GPU 없음)에서
-도는 작은 모델에 어떻게 표현력(감정·자연스러운 운율·NVV)을 넣나"를 **모델 / 기법 / 아키텍처 /
-데이터** 네 축으로 정리했다. 목적: FreyaTTS(flow-matching)에 얹을지, 경량 모델을 새로 만들지
-판단할 근거.
+> **TTS 문서 3부작 — 이 문서 = ② 서베이.**
+> ① `tts-expressivity-design.md` — 전략(온디바이스 제약·Path A/B·한국어 NVV 데이터 공백)
+> ② `tts-small-expressive-research.md` — 소형 표현력 TTS 모델·기법 서베이 ← 여기
+> ③ `tts-conversational-build-design.md` — 대화체 소형 TTS 구축 설계 + 실측 교훈
+
+"온디바이스(CM4, GPU 없음)에서 도는 작은 모델에 어떻게 표현력(감정·자연스러운 운율·NVV)을
+넣나"를 **모델 / 기법 / 아키텍처 / 데이터** 네 축으로 정리했다. 목적: FreyaTTS(flow-matching)에
+얹을지, 경량 모델을 새로 만들지 판단할 근거.
 
 ## 핵심 결론 (먼저)
 
