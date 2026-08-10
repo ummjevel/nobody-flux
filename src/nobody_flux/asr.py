@@ -44,14 +44,23 @@ if platform.system() == "Darwin":
         os.path.join(_SITE_PKGS, "onnxruntime", "**", "libonnxruntime.*.dylib"), recursive=True
     )
     _sherpa_libdirs = glob.glob(os.path.join(_SITE_PKGS, "sherpa_onnx", "lib"))
-    for _src in _ort_dylibs:
+    for _src in _ort_dylibs:  # _src is absolute (PROJECT_ROOT is absolute)
         for _libdir in _sherpa_libdirs:
             _dst = os.path.join(_libdir, os.path.basename(_src))
-            if not os.path.exists(_dst):
+            if os.path.exists(_dst):
+                continue  # a working link/file is already there
+            # Not resolvable: either missing, or a leftover BROKEN symlink (e.g.
+            # one made by hand with a relative target). Clear a broken link so
+            # the fresh absolute symlink below can be created.
+            if os.path.islink(_dst):
                 try:
-                    os.symlink(_src, _dst)  # absolute symlink to the real dylib
+                    os.remove(_dst)
                 except OSError:
                     pass
+            try:
+                os.symlink(_src, _dst)  # absolute symlink to the real dylib
+            except OSError:
+                pass
 else:
     for _versioned in glob.glob(
         os.path.join(_SITE_PKGS, "onnxruntime", "capi", "libonnxruntime.so.*")
