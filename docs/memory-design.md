@@ -1,66 +1,72 @@
-# 기억(개인화) 설계 문서
+# 기억(개인화) 설계
 
-**상태: 구현됨.** `src/nobody_flux/memory.py`가 이 문서의 설계(일괄 요약, 방어적 JSON 파싱,
-recall 시 상한)를 그대로 구현하고, `scripts/talk.py`가 세션 종료 시 추출(`extract_memories`)
-+ 세션 시작 시 recall(`format_recall_block` → `NobodyLLM.system_prompt_suffix`)을 호출한다.
-검증: `qwen3-0.6b-gguf`로 3턴짜리 샘플 대화(이름/반려동물 언급 포함) 추출 → 정확히 파싱된
-`identity`/`interest` 항목이 나오는 것 확인. 처음 프롬프트로는 모델이 사소해 보이는 사실을
-자꾸 빈 배열로 건너뛰어서(`EXTRACTION_SYSTEM_PROMPT`), 원샷 예시를 프롬프트에 추가해서
-고쳤다 — 아래 "리스크" 절이 우려했던 바로 그 문제였다.
+> 세션을 넘어 사용자를 기억하는 장기 기억 기능. **구현 완료** — 설계·구현·검증 결과를 한 문서에.
+
+## 요약
+
+- **무엇**: 세션 종료 시 대화에서 사용자 관련 사실을 추출해 SQLite에 저장하고, 다음 세션 시작 시
+  불러와 시스템 프롬프트에 주입한다.
+- **어디**: 추출/consolidation/recall 포맷팅은 `src/nobody_flux/memory.py`, 저장은
+  `storage.py`(`memories` 테이블 + `save_memory`/`update_memory`/`recent_memories`), 연결은
+  `scripts/talk.py`(세션 시작 recall + 종료 추출).
+- **상태**: 동작·검증 완료. 남은 건 여러 세션 실사용 튜닝(아래 "다음 단계").
 
 ## 왜 필요한가
 
-지금 `NobodyLLM`은 세션(프로세스) 안에서만 히스토리를 들고 있다 (`llm.py`의
-`max_history_turns`, 기본 6턴). 프로세스가 끝나면 그 대화는 사라진다. "더 personal"해지려면
-세션을 넘어 지속되는 무언가가 필요하다 — 매 세션 시작할 때마다 "퀜, 나 기억해?"에
-"아니 처음 뵙는데요"라고 답하지 않으려면.
+`NobodyLLM`은 세션(프로세스) 안에서만 히스토리를 들고 있다(`llm.py`의 `max_history_turns`,
+기본 6턴). 프로세스가 끝나면 대화가 사라진다. "더 personal"해지려면 세션을 넘어 지속되는
+무언가가 필요하다 — 매번 "퀜, 나 기억해?"에 "처음 뵙는데요"라고 답하지 않으려면.
 
-## 무엇을 추출할까 (카테고리 제안)
+## 설계 결정
+
+### 무엇을 추출할까 (카테고리)
 
 | 카테고리 | 예시 | 비고 |
 |---|---|---|
-| `identity` | 이름/닉네임 | 가장 기본, 가장 자주 쓰임 (호칭에 직접 반영) |
-| `interest` | 취미, 관심사, 최근 본 것/한 것 | 대화 소재로 재활용 가능 |
-| `recurring_topic` | 자주 언급하는 사람/장소/일정 | "그 프로젝트 잘 끝났어?" 같은 팔로업에 필요 |
-| `preference` | 음식/음악/말투 취향 | 반말 유지 여부 등 톤 조정에도 쓰일 수 있음 |
-| `context` | 직업, 사는 곳, 시간대 등 상황 정보 | 응답의 현실성에 영향 |
+| `identity` | 이름/닉네임 | 가장 기본, 호칭에 직접 반영 |
+| `interest` | 취미, 관심사, 최근 한 것 | 대화 소재로 재활용 |
+| `recurring_topic` | 자주 언급하는 사람/장소/일정 | "그 프로젝트 잘 끝났어?" 팔로업에 필요 |
+| `preference` | 음식/음악/말투 취향 | 톤 조정에도 사용 가능 |
+| `context` | 직업, 사는 곳, 시간대 | 응답의 현실성에 영향 |
 
-`storage.py`의 `memories.category`가 이 문자열을 그대로 받는다. 카테고리를 enum으로
-강제하지 않은 이유: 초기엔 카테고리 경계가 애매할 것이므로, 나중에 실제 추출된 값들을 보고
-분류 체계를 다시 잡는 게 더 정확할 것.
+`memories.category`가 이 문자열을 그대로 받는다. enum으로 강제하지 않은 이유: 초기엔 경계가
+애매하므로 실제 추출값을 보고 분류를 다시 잡는 게 정확하다.
 
-## 언제 추출할까
+### 언제 추출할까 — 세션 종료 시 일괄
 
-두 가지 옵션을 비교했다:
+- **매 턴 증분 추출**(기각): 반응성은 빠르나 0.6B에 매 턴 추가 추론 부담 + 짧은 턴에선 노이즈
+  누적.
+- **세션 종료 시 일괄**(채택): 세션 전체 turns를 한 번에 넣어 "기억할 만한 사실"을 뽑는다.
+  실시간 지연 없음 + 반복·의미 있는 내용을 걸러낼 확률이 높음. `talk.py`의 `finally` 블록
+  (세션 종료 처리부)에 붙인다.
 
-1. **매 턴마다 증분 추출** — 반응성은 빠르지만, 0.6B 모델에 매 턴 추가 추론 부담이 생기고
-   (지연시간 증가), 짧은 한두 문장짜리 턴에서는 추출할 게 거의 없어 노이즈(의미 없는 fact)가
-   쌓이기 쉽다.
-2. **세션 종료 시 일괄 요약** *(추천)* — 세션 전체 turns를 한 번에 모델에 넣고 "이번 대화에서
-   기억할 만한 사실"을 뽑게 한다. 실시간 지연에 영향 없고, 짧은 잡담보다 실제로 반복되거나
-   의미 있는 내용을 걸러낼 확률이 높다. 단점: 세션이 아주 길면 프롬프트가 길어짐 — 이 프로젝트의
-   페르소나 설계(짧은 대화 위주)를 고려하면 당장은 문제 안 될 가능성이 높음.
+### 어떻게 추출할까 — 방어적 파싱 + Mem0식 consolidation
 
-일괄 요약 쪽을 추천. `storage.py`의 `sessions.ended_at`이 세션 종료 시점을 이미 기록하므로,
-`talk.py`의 `finally` 블록(세션 종료 처리하는 곳)이 이 추출 호출을 붙이기 좋은 지점이 된다 —
-지금은 `store.end_session(session_id)`만 부르고 끝난다.
+1. **추출(`extract_memories`)**: 세션 turns를 `NobodyLLM.generate_raw`(persona/히스토리 우회)에
+   넣어 `[{category, key, value, confidence}]` JSON 배열로 뽑는다.
+2. **방어적 파싱(`_extract_json_array`)**: 0.6B는 "JSON만 출력"을 안정적으로 못 지킨다(코드펜스,
+   잡설, 깨진 JSON). 첫 `[`~마지막 `]` 구간만 파싱하고, 실패하면 빈 배열로 취급 — 한 번의 나쁜
+   생성이 세션 전체 추출을 날리지 않게.
+3. **consolidation(`consolidate_memories`, Mem0식, arXiv:2504.19413)**: 새 사실을 무조건
+   저장하지 않고 기존 기억과 비교해 **ADD/UPDATE/NOOP**로 처리한다(값이 바뀌면 UPDATE).
+   **DELETE는 일부러 뺌** — 0.6B의 구조화 출력이 불안정한데 잘못된 DELETE는 되돌릴 수 없이
+   데이터를 날리는 반면, 잘못된 ADD/UPDATE는 stale row로 남아 read-time dedup이 걸러낸다. 파싱
+   실패 시 전부 ADD로 폴백 → consolidation은 개선만 하지 절대 퇴행 안 함.
 
-## 어떻게 추출할까 (제안, 미구현)
+### 중복 정리 (2단)
 
-세션의 모든 `turns.user_text`를 모아서, 별도 프롬프트("다음 대화에서 사용자에 대해 기억할
-만한 사실을 JSON 배열로 뽑아줘: [{category, key, value, confidence}]")로 같은 `NobodyLLM`
-인스턴스(또는 별도 인스턴스)에 한 번 더 요청 → 파싱해서 `memories`에 insert.
+- **한 세션 안**(`_dedupe_memories`): 한 추출 호출이 같은 `(category, key)`에 서로 다른 값을 두
+  개 뽑으면 confidence 높은 쪽만 남김. `MAX_MEMORIES_PER_SESSION` 자르기 **전에** 적용(자른 뒤
+  중복 제거하면 상한 안에 중복만 남고 다른 사실이 밀려남).
+- **세션 간**(`recent_memories`): 같은 사실이 여러 세션에 반복 추출될 때, SQL window function으로
+  `(category, key)`별 최고 confidence/최신 행만 recall. 테이블 자체는 안 지움(읽을 때만 접는 뷰,
+  전체 이력 보존).
 
-**리스크, 구현 전에 반드시 확인**: Qwen3-0.6B는 지시를 잘 따르는 모델이 아닐 수 있고, 특히
-"JSON만 출력해" 같은 포맷 강제 지시를 0.6B급 모델이 얼마나 안정적으로 지키는지 검증되지
-않았다. 파싱 실패(포맷 깨짐, JSON 앞뒤에 잡설 붙임)를 전제로 방어적으로 파싱하거나, 별도의
-더 큰/더 잘 따르는 모델을 이 추출 전용으로 쓰는 방안도 고려해야 한다. 실제 구현 전에 몇 세션
-분량 샘플로 추출 품질을 먼저 눈으로 확인할 것.
+### 다음 세션에 어떻게 반영할까 — recall 주입
 
-## 다음 세션에 어떻게 반영할까 (제안, 미구현)
-
-세션 시작 시 (`talk.py`가 `STSPipeline`을 만들기 전) 최근/고신뢰(`confidence` 높은) 기억을
-불러와 `persona.py`의 `SYSTEM_PROMPT` 뒤에 불릿 리스트로 append:
+세션 시작 시(`STSPipeline` 생성 후, 첫 턴 전) `recent_memories()`(confidence·최신순 상위 N개)를
+`format_recall_block()`으로 불릿 리스트로 만들어 `NobodyLLM.system_prompt_suffix`에 주입한다.
+`persona.py`의 `SYSTEM_PROMPT` 뒤에 붙는다:
 
 ```
 [기억]
@@ -69,36 +75,19 @@ recall 시 상한)를 그대로 구현하고, `scripts/talk.py`가 세션 종료
 - 고양이를 키움 ("루비")
 ```
 
-주의: `SYSTEM_PROMPT`가 길어질수록 프롬프트 처리 비용이 늘고, 0.6B 모델은 긴 컨텍스트를
-정확히 반영하는 능력이 상대적으로 약할 수 있다. 기억 항목 수에 상한을 두거나(예: 최신 5~10개,
-`confidence` 기준 상위 N개), 카테고리별로 압축하는 게 필요할 가능성이 높다 — 이 부분도 실제
-동작을 보고 튜닝해야 하는 영역.
+상한을 두는 이유: `SYSTEM_PROMPT`가 길수록 처리 비용↑ + 0.6B는 긴 컨텍스트 반영 능력이 약하다.
+그래서 최신·고신뢰 상위 N개로 제한한다.
 
-## 이번에 한 것 vs 다음 단계
+## 검증 결과 (실측)
 
-- **했음**: `memories` 테이블 스키마, 이 설계 문서, `src/nobody_flux/memory.py`(추출 +
-  recall 포맷팅), `storage.py`의 `save_memory`/`recent_memories`, `talk.py`의 세션
-  시작/종료 연결, 중복 정리:
-  - **한 세션 안 중복** (`memory.py`의 `_dedupe_memories`): 한 번의 추출 호출이 같은
-    (category, key)에 대해 서로 다른 값을 두 개 뽑아내는 경우 — 실제로 검증 중 관측됨
-    (`interest`/`취미`가 confidence 다르게 두 번 뽑힘) — confidence 높은 쪽만 남김.
-    `MAX_MEMORIES_PER_SESSION` 자르기 전에 적용해서, 중복 제거로 실제 고유 사실 수가
-    줄어든 다음에 상한을 적용함 (자른 다음 중복 제거하면 상한 안에 중복만 남고 다른
-    사실이 밀려날 수 있어서).
-  - **세션 간 중복** (`storage.py`의 `recent_memories`): 같은 사실이 여러 세션에 걸쳐
-    반복 추출되는 경우 (예: "이름: 지수"를 다음 세션에서 또 언급) — SQL window function으로
-    `(category, key)`별 최고 confidence/최신 행만 남기고 recall. `memories` 테이블 자체는
-    안 지움 (읽을 때만 접는 뷰이지, 쓸 때 병합하는 게 아님) — 전체 이력은 그대로 남아있음.
-- **Mem0식 consolidation** (`memory.py`의 `consolidate_memories`, arXiv 2504.19413 참고):
-  세션 종료 시 새로 뽑은 사실을 무조건 저장하는 게 아니라, 기존 저장된 기억과 비교해서
-  **ADD/UPDATE/NOOP** 중 하나로 처리 (`talk.py`가 적용). 이전의 "무조건 저장 + 읽을 때 dedup"
-  보다 테이블이 깔끔하고, 값이 바뀐 경우(예: "사는 곳: 서울" → "부산")를 UPDATE로 명시적으로
-  갱신함. 실측: qwen3-0.6b-gguf로도 "이름:지수(기존과 동일)→NOOP, 사는 곳:부산(변경)→UPDATE,
-  취미:등산(신규)→ADD"를 정확히 판정 (원샷 예시 프롬프트 덕분). **Mem0의 DELETE는 일부러 뺌**
-  — 0.6B가 구조화 출력에 불안정한데(추출 프롬프트도 원샷 예시가 필요했음) 잘못된 DELETE는
-  데이터를 되돌릴 수 없이 날리는 반면, 잘못된 ADD/UPDATE는 stale row로 남아 read-time dedup이
-  걸러낼 수 있어서. 파싱 실패 시 전부 ADD로 폴백 → consolidation은 개선만 하지 절대 퇴행 안 함.
-- **다음 단계**: 여러 세션에 걸쳐 실제로 써보면서 추출/consolidation 품질(특히 UPDATE 오판정,
-  `confidence` 값의 의미) 확인. `memories` 테이블이 무한정 커지는 문제는 UPDATE가 값 바뀐
-  경우는 잡아주지만, 완전히 다른 사실이 계속 쌓이는 건 여전 — 오래된/낮은 confidence 행 정리
-  로직은 아직 없음(지금 스케일에선 보류).
+- `qwen3-0.6b-gguf`로 3턴 샘플 대화(이름/반려동물 언급) 추출 → `identity`/`interest` 정확히 파싱.
+- consolidation도 0.6B로 "이름:지수(동일)→NOOP, 사는 곳:서울→부산(변경)→UPDATE, 취미:등산(신규)
+  →ADD"를 정확히 판정.
+- **핵심 교훈**: 처음엔 모델이 사소한 사실을 자꾸 빈 배열로 건너뛰었다 → 추출·consolidation
+  프롬프트 모두 **원샷 예시**를 넣어 해결. 위 "리스크"가 우려한 그 문제였다.
+
+## 다음 단계
+
+- 여러 세션 실사용으로 추출/consolidation 품질 확인(특히 UPDATE 오판정, `confidence`의 의미).
+- 테이블 무한 증가: UPDATE가 "값 변경"은 잡지만 "완전히 다른 새 사실"이 계속 쌓이는 건 여전 —
+  오래된/낮은 confidence 행 정리 로직은 아직 없음(지금 스케일에선 보류).
