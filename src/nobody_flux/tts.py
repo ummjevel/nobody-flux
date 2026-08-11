@@ -37,11 +37,15 @@ again, since it isn't a declared dependency here).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 # sherpa_onnx (used by SherpaMatchaTts below) needs the same
 # libonnxruntime.so symlink + LD_LIBRARY_PATH setup that asr.py's
@@ -58,6 +62,25 @@ from .paths import PROJECT_ROOT
 
 MOSS_TTS_NANO_REPO = PROJECT_ROOT / "external" / "MOSS-TTS-Nano"
 DEFAULT_REFERENCE_AUDIO = PROJECT_ROOT / "data" / "reference_voice_16k.wav"
+
+
+def _synthesize_to_array(tts, text: str) -> tuple[np.ndarray, int]:
+    """synthesize() a preset that only knows how to write a wav file, then read
+    it back as a mono float32 array. The streaming pipeline (pipeline.run_streaming)
+    plays per-sentence chunks from memory, so it needs samples, not a path -- but
+    the subprocess-backed presets (FreyaTtsKo/NobodyTTS) can only produce a file.
+    In-process presets (SherpaMatchaTts) override synthesize_audio() to skip this
+    round-trip entirely."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp = f.name
+    try:
+        tts.synthesize(text, tmp)
+        audio, sr = sf.read(tmp, dtype="float32", always_2d=False)
+    finally:
+        os.unlink(tmp)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    return np.ascontiguousarray(audio, dtype=np.float32), int(sr)
 
 
 @dataclass
@@ -119,6 +142,10 @@ class NobodyTTS:
         if result.returncode != 0:
             raise RuntimeError(f"MOSS-TTS-Nano failed:\n{result.stderr[-2000:]}")
         return out_path
+
+    def synthesize_audio(self, text: str) -> tuple[np.ndarray, int]:
+        """Mono float32 samples + sample rate (see _synthesize_to_array)."""
+        return _synthesize_to_array(self, text)
 
 
 FREYATTS_VENV_DIR = PROJECT_ROOT / "external" / "freyatts-venv"
@@ -254,6 +281,10 @@ class FreyaTtsKo:
             raise RuntimeError(f"freyatts server: {response.get('error')}")
         return out_path
 
+    def synthesize_audio(self, text: str) -> tuple[np.ndarray, int]:
+        """Mono float32 samples + sample rate (see _synthesize_to_array)."""
+        return _synthesize_to_array(self, text)
+
     def close(self) -> None:
         if self._proc is None or self._proc.poll() is not None:
             return
@@ -340,6 +371,13 @@ class SherpaMatchaTts:
         """Synthesize `text` (English only -- see class docstring) to a wav
         at `out_path`, at whatever sample rate the acoustic model/vocoder
         pair uses (22050Hz for vocos-22khz-univ.onnx)."""
-        audio = self.tts.generate(text, sid=self.speaker_id, speed=self.speed)
-        sf.write(out_path, audio.samples, samplerate=audio.sample_rate)
+        samples, sr = self.synthesize_audio(text)
+        sf.write(out_path, samples, samplerate=sr)
         return out_path
+
+    def synthesize_audio(self, text: str) -> tuple[np.ndarray, int]:
+        """In-process native path -- no file round-trip (see
+        _synthesize_to_array). sherpa_onnx returns mono float32 samples
+        directly, which is exactly what the streaming playback queue wants."""
+        audio = self.tts.generate(text, sid=self.speaker_id, speed=self.speed)
+        return np.ascontiguousarray(audio.samples, dtype=np.float32), int(audio.sample_rate)

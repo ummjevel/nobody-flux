@@ -1,0 +1,23 @@
+# Echo-cancellation / duplex audio backend for the barge-in mic loop
+# (src/nobody_flux/audio.py). Used only by scripts/talk.py's live mic loop when
+# --aec is passed (run_pipeline.py is wav-in/wav-out and never opens a device).
+# Selectable at runtime with --aec on talk.py; this file is the default.
+#
+# backend:
+#   auto           pick per platform + installed libs (speexdsp) -- default
+#   shared-refgate one duplex stream + dependency-free reference gate
+#                  (suppresses the reply's echo so it can't false-trip barge-in)
+#   shared-speex   one duplex stream + SpeexDSP AEC (needs the `speexdsp` package)
+#   os-echocancel  Linux/CM4: capture from PipeWire/Pulse module-echo-cancel
+#                  (OS does WebRTC AEC; load the module at the system level first)
+#   vpio           macOS VoiceProcessingIO (needs a native binding; not wired yet)
+#   off            single duplex stream but no echo handling (separate-device setups)
+#
+# A single duplex stream (any shared-* / off backend) also resolves the
+# macOS/CoreAudio err -50 conflict that talk.py's --no-barge-in works around.
+backend: auto
+
+# Speaker->mic acoustic round-trip delay, in 30ms frames, used to align the
+# reference for the gate-style canceller (Speex models the delay itself).
+# scripts/_calibrate_aec_delay.py measures the real value and rewrites this.
+delay_frames: 4

@@ -19,13 +19,14 @@ from typing import Any
 
 import yaml
 
-from . import asr, llm, tts, turn_detector, vad
+from . import asr, audio, llm, tts, turn_detector, vad
 from .paths import PROJECT_ROOT
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
 VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 TURN_DETECTOR_CONFIG_PATH = PROJECT_ROOT / "configs" / "turn_detector.yaml"
+AUDIO_CONFIG_PATH = PROJECT_ROOT / "configs" / "audio.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -157,6 +158,19 @@ def build_vad(**overrides) -> vad.VoiceActivityDetector:
     config = _load_yaml(VAD_CONFIG_PATH)
     config.update(overrides)
     return vad.VoiceActivityDetector(**config)
+
+
+def build_audio_session(backend: str | None = None) -> audio.AudioSession:
+    """Build the duplex/AEC audio session for talk.py's mic loop from
+    configs/audio.yaml (see audio.py). `backend` overrides the yaml's `backend`
+    field (e.g. from talk.py's --aec); 'auto' resolves per platform + installed
+    libs. Not a named preset like asr/llm/tts -- there's one config's worth of
+    knobs, same flat-yaml pattern as build_vad/build_turn_detector. The session's
+    stream isn't opened until .start()."""
+    config = _load_yaml(AUDIO_CONFIG_PATH)
+    prefer = backend or config.get("backend", "auto")
+    resolved = audio.select_backend(prefer)
+    return audio.build_session(resolved, delay_frames=int(config.get("delay_frames", 4)))
 
 
 def build_turn_detector(**overrides) -> turn_detector.TurnDetector:

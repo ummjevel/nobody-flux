@@ -9,6 +9,13 @@
 캐스케이드 **ASR → LLM → TTS**. 어느 모델이 도는지는 코드가 아니라 `configs/models.yaml`이 결정
 (`registry.py`가 로드). `run_pipeline.py`/`talk.py` 둘 다 `--asr/--llm/--tts <preset>`로 선택.
 
+**스트리밍 출력** (`pipeline.run_streaming`, Phase 1): 응답을 통째로 만든 뒤 재생하는 대신, LLM을
+토큰 스트리밍(`llm.reply_stream`)으로 받아 문장 단위로 자르고(`textchunk.SentenceChunker`) 나오는
+대로 TTS(`tts.synthesize_audio`)해 재생 큐에 넣는다 → 첫 음성까지(ttfa)가 `asr+첫문장 llm+첫문장
+tts`로 줄고, 이후 문장 합성이 앞 문장 재생과 겹친다. 실측(개발 박스, sherpa-matcha-ko 기본):
+첫 오디오가 LLM 응답 완료보다 먼저 나옴. 배치 경로(`pipeline.run`)는 `run_pipeline.py`/`benchmark.py`
+용으로 그대로 유지. 발화 불가 문자(이모지 등)는 합성 전 `sanitize_for_tts`가 걸러 빈 청크를 스킵.
+
 | 스테이지 | 현재 기본값 | 구현 |
 |---|---|---|
 | ASR | `sense-voice-small` | `src/nobody_flux/asr.py` |
@@ -44,10 +51,21 @@
 ## 대화 경험 (`scripts/talk.py`)
 
 - **연속 음성 루프**: 상시 프로세스. 한 번 띄우면 `NobodyLLM` 히스토리가 세션 내내 유지 → 실제 멀티턴.
+- **스트리밍 재생** (`ChunkPlayer`): 응답이 문장 청크로 스트리밍돼 백그라운드 재생 큐에서 순차 재생.
+  barge-in 시 큐 전체를 clip. 프로덕션 구간(LLM 생성 중) barge-in은 아직 미포착 — Phase 1.5
+  `AudioSession`이 닫을 예정(아래).
 - **턴 경계 = TEN-VAD** (`vad.py`, sherpa_onnx 내장, `configs/vad.yaml`로 튜닝). 버튼 불필요.
   재튜닝은 `scripts/_debug_vad_mic.py`로 진단.
 - **끼어들기(barge-in)**: 다음 발화 감지 대기가 응답 재생과 동시에 시작 → 재생 중 말하면 끊김
-  (`play_async`/`on_barge_in_confirmed`). 에코 제거(AEC) 없음(WSL2 환경선 오탐 미관측).
+  (`ChunkPlayer.stop`/`on_barge_in_confirmed`).
+- **에코 제거(AEC) / 듀플렉스** (`--aec`, `audio.py`/`aec.py`, Phase 1.5): 기본은 legacy(별도 마이크/
+  스피커 스트림, AEC 없음 — WSL2선 오탐 미관측). `--aec`를 주면 **단일 duplex `sd.Stream`**(캡처+재생
+  한 소유자)으로 라우팅 → 응답 에코를 마이크에서 제거하고, macOS err-50 듀플렉스 충돌도 회피(그래서
+  `--aec` 켜면 `--no-barge-in` 불필요). 백엔드: `refgate`(무의존 억제 게이트) / `speex`(진짜 AEC,
+  `speexdsp` 필요) / `os`(Linux/CM4 module-echo-cancel) / `vpio`(macOS, 네이티브 바인딩 미구현—hook) /
+  `auto`(플랫폼·라이브러리 자동선택, `configs/audio.yaml`). 지연 정렬은 `scripts/_calibrate_aec_delay.py`로
+  실측해 `delay_frames`에 기록. **마이크 루프는 로직 검증만, 실기 마이크 미검증**(개발 박스 마이크 제약 —
+  `run_pipeline.py`로 파이프라인 로직은 검증됨).
   - **backchannel("어"/"응") 구분** (`docs/barge-in-design.md`): ① 지연-정지(`barge_in_confirm_ms`
     250ms 이상 지속돼야 재생 끊음) + ② 사후 어휘 판정(`backchannel.py`의 `is_backchannel()`이 맞장구면
     `pipeline.py`의 `should_continue_after_asr` 훅으로 LLM/TTS/저장 스킵). 파라미터는 실측 전 추정치.
@@ -97,6 +115,10 @@
   `tts-conversational-build-design.md`) 참고. 방향: 대형 GPU 표현 모델은 서버 teacher로만, 디바이스는
   경량 CPU 모델(FreyaTTS 등)에 한국어 NVV 데이터+조건화를 얹기. CosyVoice2 한국어 NVV 실측은
   서버(H100) 작업으로 보류.
-- **barge-in/엔드포인트 파라미터 마이크 실측** (`docs/barge-in-design.md`) — WSL2 마이크 불안정 →
-  H100에서.
+- **barge-in/엔드포인트/AEC 파라미터 마이크 실측** (`docs/barge-in-design.md`) — barge-in 임계값 +
+  `--aec` 백엔드(`refgate` corr_threshold, `speex`) + `_calibrate_aec_delay.py`의 `delay_frames`를
+  실기 마이크에서 확정. WSL2 마이크 불안정 → macOS(네이티브) 또는 H100에서.
+- **턴테이킹·레이턴시 Phase 2~4** — 적응형 엔드포인팅(Smart Turn `prob_complete`로 `endpoint_grace_ms`
+  동적화), 진짜 스트리밍 ASR(streaming-zipformer 라이브 partial + LocalAgreement), 프로덕션 구간
+  barge-in(`AudioSession`이 캡처+재생을 소유하므로 생성 중에도 끼어들기 포착), 3-상태 턴 리팩터.
 - **CM4 실기 실측** — 리서치 문서가 요구한 전제("모델 선정보다 CM4 PoC 선행").

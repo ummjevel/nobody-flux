@@ -25,6 +25,7 @@ this prototype) acoustic classifiers.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -117,8 +118,17 @@ class VoiceActivityDetector:
         on_speech_start: Callable[[], None] | None = None,
         on_barge_in_confirmed: Callable[[], None] | None = None,
         turn_detector: "TurnDetector | None" = None,
+        frame_source: Callable[[], np.ndarray] | None = None,
     ) -> Utterance:
         """Block until one spoken turn has been captured, then return it.
+
+        frame_source: optional callable returning the next FRAME_SAMPLES-long
+        mono float32 frame. When given, this reads from it instead of opening
+        its own sd.InputStream -- that's how the unified duplex AudioSession
+        (audio.py, Phase 1.5) feeds already-echo-cancelled mic frames in, so
+        capture and playback share one stream (fixes the macOS err -50 duplex
+        conflict) and barge-in doesn't false-trip on the reply's own echo. When
+        None (default), behaviour is unchanged: this owns a private input stream.
 
         Feeds mic frames into the VAD's streaming accept_waveform() until it
         queues one finished segment (its own internal state machine handles
@@ -170,12 +180,30 @@ class VoiceActivityDetector:
         carried: np.ndarray | None = None
         barge_in_fired = False  # hoisted across segments: one barge-in per turn, not per segment
 
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=FRAME_SAMPLES,
-        ) as stream:
+        # Own a private input stream only when no external frame_source is given
+        # (see that arg). With one, the AudioSession owns the (duplex) stream and
+        # this just pulls frames from it -- contextlib.nullcontext keeps the
+        # `with` shape identical either way.
+        if frame_source is None:
+            stream_ctx = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=FRAME_SAMPLES,
+            )
+        else:
+            stream_ctx = contextlib.nullcontext()
+
+        with stream_ctx as stream:
+
+            def next_frame() -> np.ndarray:
+                if frame_source is not None:
+                    return frame_source()
+                block, _overflowed = stream.read(FRAME_SAMPLES)
+                # InputStream.read() may reuse its internal buffer across calls
+                # -- copy before stashing it past this iteration.
+                return block[:, 0].copy()
+
             while True:  # outer loop: one iteration captures one VAD segment
                 self._vad.reset()
                 speaking = False
@@ -184,10 +212,7 @@ class VoiceActivityDetector:
                 frames: list[np.ndarray] = []
 
                 while True:  # inner loop: accumulate frames until one segment finalizes
-                    block, _overflowed = stream.read(FRAME_SAMPLES)
-                    # InputStream.read() may reuse its internal buffer across
-                    # calls -- copy before stashing it past this iteration.
-                    samples = block[:, 0].copy()
+                    samples = next_frame()
                     frames.append(samples)
                     self._vad.accept_waveform(samples)
 

@@ -45,6 +45,7 @@ Usage:
 """
 
 import argparse
+import queue
 import sys
 import threading
 import time
@@ -52,6 +53,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import numpy as np
 import soundfile as sf
 import sounddevice as sd
 from loguru import logger
@@ -77,61 +79,134 @@ PLAYBACK_TIMEOUT_MARGIN_S = 5.0
 GREETING_TEXT = "안녕, 나 지금 듣고 있어."
 
 
-def play_async(audio, sample_rate: int, playback_active: threading.Event) -> threading.Thread:
-    """Like sd.play() + sd.wait(), but runs on a background thread (so the
-    caller can start listening for the next utterance immediately, for
-    barge-in -- see module docstring) and never blocks that thread forever.
+class ChunkPlayer:
+    """Sequential background playback of a streamed reply's chunks
+    (pipeline.AudioChunk). Chunks are enqueue()'d as they're synthesized and a
+    worker thread plays them back to back, so playback of chunk 1 overlaps
+    synthesis of chunk 2+ (Phase 1's point -- see pipeline.run_streaming).
+    Replaces the old single-clip play_async: a reply is now N chunks, not one
+    wav.
 
-    playback_active is set for the duration of this specific clip's
-    playback and cleared right before returning -- it's how on_speech_start
-    (below, in main()) decides whether "speech just started" means
-    "interrupt the reply that's currently playing" or "just the normal start
-    of the next turn." Cleared in a `finally` so a timeout or an explicit
-    sd.stop() from a barge-in both still leave it correctly cleared.
+    `active` is set while a reply is playing or still has pending chunks --
+    on_barge_in_confirmed reads it exactly like the old playback_active Event
+    did, to tell "the user is interrupting a reply" apart from "the user is
+    just starting the next turn while nothing is playing."
 
-    sd.wait() has no timeout parameter -- if the underlying audio backend
-    stalls mid-playback, this would otherwise hang forever, and from a caller
-    stuck in the main while-loop that's indistinguishable from the session
-    simply never returning to "listening" for the next turn.
+    stop() clips the whole reply (current clip + everything still queued) for a
+    confirmed barge-in. Playback is sd.play/sd.wait (one output stream), same
+    as before; the unified duplex AudioSession (Phase 1.5, audio.py) will later
+    take over capture+playback+AEC together and supersede this.
 
-    First version of this polled sd.get_stream().active with a deadline
-    instead of calling sd.wait() at all -- confirmed by hand that was wrong:
-    on this dev box's WSL2/WSLg PulseAudio passthrough, .active stayed True
-    for the full (clip duration + margin) on EVERY turn regardless of
-    whether playback had actually already finished, so every single reply
-    paid the full margin as dead time even when nothing was stalled. Calling
-    the real sd.wait() on a background thread and joining it with a timeout
-    gets fast completion back (wait() returns as soon as playback genuinely
-    ends, including a barge-in's early sd.stop()) while still bounding the
-    wait if the backend truly does stall.
+    Per-chunk watchdog: sd.wait() has no timeout, so a stalled backend would
+    hang the worker forever. Each chunk is bounded by its own duration plus a
+    margin (same reasoning as the old play_async), after which it force-stops
+    and moves on."""
 
-    Returns the background thread so the caller can join() it before
-    starting the *next* clip's playback (sd.play() itself would just cut the
-    previous clip off, but leaving the previous watchdog thread running past
-    that point serves no purpose).
-    """
-    playback_active.set()
-    sd.play(audio, sample_rate)
-    timeout = len(audio) / sample_rate + PLAYBACK_TIMEOUT_MARGIN_S
+    def __init__(self):
+        self._q: queue.Queue = queue.Queue()
+        self._stop = threading.Event()
+        self.active = threading.Event()
+        self._thread: threading.Thread | None = None
 
-    def _wait():
-        done = threading.Event()
+    def start(self) -> None:
+        self._stop.clear()
+        # Set immediately: a reply is incoming even before the first chunk is
+        # enqueued, so a barge-in in that window is still recognized as one.
+        self.active.set()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def enqueue(self, samples: np.ndarray, sample_rate: int) -> None:
+        self._q.put((samples, sample_rate))
+
+    def done(self) -> None:
+        """Signal no more chunks will be enqueued for this reply (sentinel)."""
+        self._q.put(None)
+
+    def _run(self) -> None:
+        try:
+            while True:
+                item = self._q.get()
+                if item is None:
+                    break
+                if self._stop.is_set():
+                    continue  # post-barge-in: drain remaining chunks unplayed
+                self._play_one(*item)
+        finally:
+            self.active.clear()
+
+    def _play_one(self, samples: np.ndarray, sample_rate: int) -> None:
+        sd.play(samples, sample_rate)
+        timeout = len(samples) / sample_rate + PLAYBACK_TIMEOUT_MARGIN_S
+        finished = threading.Event()
 
         def _mark_done():
             sd.wait()
-            done.set()
+            finished.set()
 
         threading.Thread(target=_mark_done, daemon=True).start()
-        try:
-            if not done.wait(timeout=timeout):
-                logger.warning("[playback] timed out, stopping and moving on to the next turn")
-                sd.stop()
-        finally:
-            playback_active.clear()
+        if not finished.wait(timeout=timeout):
+            logger.warning("[playback] timed out, stopping and moving on")
+            sd.stop()
 
-    thread = threading.Thread(target=_wait, daemon=True)
-    thread.start()
-    return thread
+    def stop(self) -> None:
+        """Confirmed barge-in: cut current playback and discard queued chunks."""
+        self._stop.set()
+        sd.stop()
+
+    def stop_requested(self) -> bool:
+        """True once stop() has been called (barge-in) -- the producer polls
+        this to abandon synthesizing the rest of an interrupted reply."""
+        return self._stop.is_set()
+
+    def is_active(self) -> bool:
+        return self.active.is_set()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+
+class SessionPlayer:
+    """ChunkPlayer-compatible facade over an audio.AudioSession's playback, so
+    the turn loop is byte-for-byte identical whether or not the duplex/AEC
+    session is in use. Playback (and thus the AEC reference) goes through the
+    session's single stream instead of a private sd.play, which is what lets
+    capture and playback coexist without the macOS err -50 conflict."""
+
+    def __init__(self, session):
+        self._session = session
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        self._stop.clear()
+
+    def enqueue(self, samples: np.ndarray, sample_rate: int) -> None:
+        self._session.play(samples, sample_rate)
+
+    def done(self) -> None:
+        # Nothing to signal: the session drains its own playback buffer.
+        pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._session.stop_playback()
+
+    def stop_requested(self) -> bool:
+        return self._stop.is_set()
+
+    def is_active(self) -> bool:
+        return self._session.playback_active()
+
+    def join(self, timeout: float | None = None) -> None:
+        # Wait for the session's playback buffer to drain (or a barge-in stop),
+        # bounded by timeout -- the session plays on its own callback thread, so
+        # there's no worker thread to join, just a state to poll.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._session.playback_active() and not self._stop.is_set():
+            if deadline is not None and time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
 
 # Default loguru sink already includes a timestamp; this just tightens the
 # format to level + message (module/line noise isn't useful for a live
@@ -160,7 +235,30 @@ def main():
         "macOS/CoreAudio conflicts (PaMacCore err -50) and corrupts mic capture. "
         "Use this to get a clean turn on a Mac until real AEC/duplex handling lands.",
     )
+    parser.add_argument(
+        "--aec",
+        default="none",
+        choices=["none", "auto", "off", "refgate", "speex", "os", "vpio"],
+        help="route mic+speaker through the unified duplex AudioSession "
+        "(src/nobody_flux/audio.py) with echo cancellation, instead of the "
+        "legacy separate mic/speaker streams. 'none' (default) = legacy path. "
+        "A single duplex stream also fixes the macOS err -50 conflict, so with "
+        "--aec you generally don't need --no-barge-in. 'auto' picks per platform "
+        "+ installed libs; refgate=dependency-free suppression gate, speex=real "
+        "AEC (needs speexdsp), os=Linux module-echo-cancel, vpio=macOS (not wired). "
+        "See configs/audio.yaml.",
+    )
     args = parser.parse_args()
+
+    # --aec short names -> audio.build_session backend names (see audio.py).
+    AEC_BACKENDS = {
+        "auto": "auto",
+        "off": "off",
+        "refgate": "shared-refgate",
+        "speex": "shared-speex",
+        "os": "os-echocancel",
+        "vpio": "vpio",
+    }
 
     logger.info("Loading models...")
     pipeline, presets = build_pipeline_from_args(args)
@@ -170,6 +268,30 @@ def main():
     turn_detector = registry.build_turn_detector() if args.endpoint_detect else None
     if turn_detector is not None:
         logger.info("[turn] Smart Turn v3 endpoint detection enabled")
+
+    # Unified duplex/AEC audio session (audio.py), opt-in via --aec. When on, it
+    # owns one stream doing both capture and playback: vad reads frames from it
+    # (frame_source below) and replies play through it (SessionPlayer), so the
+    # reply's echo is cancelled out of the mic and the macOS err -50 duplex
+    # conflict never arises. When off (default), capture/playback stay on the
+    # legacy separate streams (vad's own InputStream + ChunkPlayer's sd.play).
+    audio_session = None
+    if args.aec != "none":
+        audio_session = registry.build_audio_session(AEC_BACKENDS[args.aec])
+        audio_session.start()
+        logger.info(f"[audio] duplex AEC session active (--aec {args.aec})")
+    frame_source = audio_session.read_frame if audio_session is not None else None
+
+    def make_player():
+        """A ChunkPlayer (legacy) or SessionPlayer (AEC session) exposing the
+        same interface, so the turn loop below doesn't branch on which is used."""
+        if audio_session is not None:
+            player = SessionPlayer(audio_session)
+        else:
+            player = ChunkPlayer()
+        player.start()
+        return player
+
     store = ConversationStore()
     session_id = store.start_session()
     session_dir = SESSION_AUDIO_DIR / str(session_id)
@@ -194,14 +316,12 @@ def main():
         "tts": "[TTS] synthesizing...",
     }
 
-    # Set for exactly the duration of a reply/greeting clip's playback (see
-    # play_async) -- on_barge_in_confirmed uses this to tell "barge-in during
-    # a reply" apart from "the normal start of the next turn while nothing is
-    # playing." No lock needed: both callbacks only ever read/write this from
-    # the single thread running vad.listen_for_utterance's loop, and
-    # play_async's own background thread is the only other writer.
-    playback_active = threading.Event()
-    playback_thread: threading.Thread | None = None
+    # The reply/greeting currently playing (or None). Reassigned each turn; the
+    # barge-in callback reads whichever ChunkPlayer is active through this
+    # single-element holder so it always targets the current reply. A plain
+    # local wouldn't work -- the nested callbacks would close over its initial
+    # value, not the per-turn reassignment.
+    state: dict[str, ChunkPlayer | None] = {"player": None}
 
     def on_speech_start():
         # Printed the instant VAD's IDLE->RECORDING transition fires, not
@@ -218,13 +338,15 @@ def main():
         # Fires once speech has continued past vad.yaml's
         # barge_in_confirm_ms -- see vad.py's field docstring and
         # docs/barge-in-design.md. Backchannel is short enough that this
-        # usually never fires for it at all; only stops playback if it's
-        # actually still going (a normal turn-start while nothing is
-        # playing also reaches here, is_set() is False, and this is a
-        # no-op).
-        if playback_active.is_set():
+        # usually never fires for it at all; only clips the reply if one is
+        # actually still playing (a normal turn-start while nothing is playing
+        # also reaches here, active is clear, and this is a no-op). With
+        # streaming playback this clips ALL remaining queued chunks, not just
+        # the one clip that happens to be sounding (ChunkPlayer.stop()).
+        player = state["player"]
+        if player is not None and player.is_active():
             logger.info("[VAD] barge-in confirmed, stopping playback")
-            sd.stop()
+            player.stop()
 
     def on_stage_start(stage: str):
         logger.info(STAGE_LABELS[stage])
@@ -241,104 +363,137 @@ def main():
 
     logger.info(f"Session {session_id} started. Speak after the beep-less silence; Ctrl+C to end.")
 
+    def produce(utterance, turn_index: int, player: ChunkPlayer) -> None:
+        """Drive run_streaming for one turn: enqueue each synthesized chunk to
+        `player` as it's produced (so playback overlaps synthesis), then log the
+        turn. Runs on the main thread on purpose -- playback happens on the
+        player's own worker thread, and the *next* listen() overlaps this
+        reply's tail for barge-in. Keeping it synchronous means ConversationStore's
+        SQLite connection is only ever used from the main thread.
+
+        Known gap (Phase 1.5): since this blocks the main thread until the LLM
+        finishes, a barge-in landing *during* generation isn't seen until
+        generation completes -- only the playback tail past that point is
+        interruptible. The unified duplex AudioSession (audio.py) will close this."""
+        wav_in = session_dir / f"turn_{turn_index:03d}_in.wav"
+        wav_out = session_dir / f"turn_{turn_index:03d}_out.wav"
+        sf.write(str(wav_in), utterance.audio, utterance.sample_rate)
+        duration_s = len(utterance.audio) / utterance.sample_rate
+
+        collected: list[np.ndarray] = []
+        combined_sr: int | None = None
+        summary = None
+        gen = pipeline.run_streaming(
+            str(wav_in),
+            on_stage_start=on_stage_start,
+            on_result=on_result,
+            # docs/barge-in-design.md stage 2: skip LLM/TTS/storage for a short
+            # utterance whose ASR result is a bare backchannel word.
+            should_continue_after_asr=lambda text: not is_backchannel(text, duration_s),
+        )
+        try:
+            while True:
+                try:
+                    chunk = next(gen)
+                except StopIteration as done:
+                    summary = done.value
+                    break
+                if player.stop_requested():
+                    gen.close()
+                    break
+                player.enqueue(chunk.samples, chunk.sample_rate)
+                collected.append(chunk.samples)
+                combined_sr = chunk.sample_rate
+        finally:
+            player.done()
+
+        if summary is None:
+            logger.info("[playback] reply interrupted")
+            return
+        if summary.get("skipped"):
+            logger.info(f"[VAD] backchannel ignored: {summary['user_text']!r}")
+            return
+
+        logger.info(
+            f"[timing] asr={summary['asr_ms']}ms llm={summary['llm_ms']}ms "
+            f"tts={summary['tts_ms']}ms ttfa={summary['ttfa_ms']}ms"
+        )
+        # Persist the full reply audio (chunks concatenated) so the stored
+        # reply_wav_path matches what was actually played.
+        if collected and combined_sr is not None:
+            sf.write(str(wav_out), np.concatenate(collected), combined_sr)
+        store.log_turn(
+            session_id,
+            turn_index,
+            summary["user_text"],
+            summary["reply_text"],
+            user_wav_path=str(wav_in),
+            reply_wav_path=str(wav_out) if collected else None,
+            asr_preset=presets["asr"],
+            llm_preset=presets["llm"],
+            tts_preset=presets["tts"],
+            asr_ms=summary["asr_ms"],
+            llm_ms=summary["llm_ms"],
+            tts_ms=summary["tts_ms"],
+        )
+
     logger.info("[TTS] synthesizing greeting...")
-    greeting_wav = session_dir / "greeting.wav"
-    pipeline.tts.synthesize(GREETING_TEXT, out_path=str(greeting_wav))
     logger.info(f"[nobody] {GREETING_TEXT}")
-    greeting_audio, greeting_sr = sf.read(str(greeting_wav), dtype="float32")
-    playback_thread = play_async(greeting_audio, greeting_sr, playback_active)
+    greeting_audio, greeting_sr = pipeline.tts.synthesize_audio(GREETING_TEXT)
+    greeting_player = make_player()
+    greeting_player.enqueue(greeting_audio, greeting_sr)
+    greeting_player.done()
+    state["player"] = greeting_player
 
     turn_index = 0
     try:
         while True:
-            # Sequential mode (--no-barge-in): wait for the reply/greeting to
-            # finish playing BEFORE opening the mic, so a playback stream and a
-            # mic stream are never open at once. Avoids the macOS/CoreAudio
-            # duplex conflict (err -50) that corrupts capture. Costs barge-in.
-            if args.no_barge_in and playback_thread is not None:
-                playback_thread.join()
+            # Sequential mode (--no-barge-in): finish playing the previous
+            # reply/greeting BEFORE opening the mic, so a playback stream and a
+            # mic stream are never open at once (avoids the macOS/CoreAudio
+            # duplex conflict, err -50). Costs barge-in.
+            if args.no_barge_in and state["player"] is not None:
+                state["player"].join()
 
             logger.info("... listening ...")
-            # In the default (barge-in) mode this deliberately starts before
-            # playback_thread (the previous reply, or the greeting) has finished
-            # -- that overlap is what makes barge-in possible.
-            # on_barge_in_confirmed cuts the still-playing clip off (once
-            # confirmed real). This call blocks until an utterance completes
-            # either way. In --no-barge-in mode nothing is playing by now, so
-            # the barge-in callback is passed as None.
+            # Default (barge-in) mode: this starts while the previous reply is
+            # still playing -- that overlap is what makes barge-in possible.
+            # on_barge_in_confirmed clips the still-playing reply once confirmed.
             utterance = vad.listen_for_utterance(
                 on_speech_start=on_speech_start,
                 on_barge_in_confirmed=None if args.no_barge_in else on_barge_in_confirmed,
                 turn_detector=turn_detector,
+                frame_source=frame_source,
             )
+
+            # Previous reply's player: barge-in (if any) already stopped it;
+            # join so its worker is done before this turn starts a new one.
+            if state["player"] is not None:
+                state["player"].join()
+                state["player"] = None
+
             if utterance.audio.size == 0:
                 continue
-
-            # Not strictly necessary (on_speech_start already stopped
-            # playback if this was a barge-in, and play_async's own
-            # background thread clears playback_active itself once done) --
-            # but joining here means the *next* play_async call below can't
-            # race with this one's watchdog thread still winding down.
-            if playback_thread is not None:
-                playback_thread.join()
 
             duration_s = len(utterance.audio) / utterance.sample_rate
             logger.info(f"[VAD] silence detected, recording ended ({duration_s:.1f}s captured)")
 
             turn_index += 1
-            wav_in = session_dir / f"turn_{turn_index:03d}_in.wav"
-            wav_out = session_dir / f"turn_{turn_index:03d}_out.wav"
-            sf.write(str(wav_in), utterance.audio, utterance.sample_rate)
-
-            result = pipeline.run(
-                str(wav_in),
-                str(wav_out),
-                on_stage_start=on_stage_start,
-                on_result=on_result,
-                # docs/barge-in-design.md stage 2: skip LLM/TTS/storage
-                # entirely for a short utterance whose ASR result is a bare
-                # backchannel word -- duration_s is the same value already
-                # logged above (VAD's own segment length, not re-measured).
-                should_continue_after_asr=lambda text: not is_backchannel(text, duration_s),
-            )
-            if result["skipped"]:
-                logger.info(f"[VAD] backchannel ignored: {result['user_text']!r}")
-                continue
-
-            logger.info(
-                f"[timing] asr={result['asr_ms']}ms llm={result['llm_ms']}ms "
-                f"tts={result['tts_ms']}ms"
-            )
-
-            logger.info("[playback] playing reply...")
-            reply_audio, reply_sr = sf.read(str(wav_out), dtype="float32")
-            playback_thread = play_async(reply_audio, reply_sr, playback_active)
-
-            store.log_turn(
-                session_id,
-                turn_index,
-                result["user_text"],
-                result["reply_text"],
-                user_wav_path=str(wav_in),
-                reply_wav_path=str(wav_out),
-                asr_preset=presets["asr"],
-                llm_preset=presets["llm"],
-                tts_preset=presets["tts"],
-                asr_ms=result["asr_ms"],
-                llm_ms=result["llm_ms"],
-                tts_ms=result["tts_ms"],
-            )
+            player = make_player()
+            state["player"] = player
+            produce(utterance, turn_index, player)
     except KeyboardInterrupt:
         pass
     finally:
-        # Cut off whatever's still playing rather than letting it run out on
-        # its own after Ctrl+C -- and join so play_async's watchdog thread
-        # doesn't outlive the process it's a daemon thread of anyway, but
-        # this makes the "playback stopped" state deterministic before the
-        # rest of shutdown runs.
+        # Cut off whatever's still playing after Ctrl+C and join the player's
+        # worker so it doesn't outlive the process (daemon anyway, but this
+        # makes shutdown deterministic before memory extraction runs).
+        if state["player"] is not None:
+            state["player"].stop()
+            state["player"].join(timeout=1.0)
         sd.stop()
-        if playback_thread is not None:
-            playback_thread.join(timeout=1.0)
+        if audio_session is not None:
+            audio_session.close()
 
         # Session-end batch extraction (docs/memory-design.md's recommended
         # timing over per-turn) -- runs before pipeline.close() since it

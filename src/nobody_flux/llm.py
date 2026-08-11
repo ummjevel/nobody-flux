@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Thread
+from typing import Iterator
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from .paths import PROJECT_ROOT
 from .persona import SYSTEM_PROMPT
@@ -69,15 +71,7 @@ class NobodyLLM:
     def reset(self):
         self.history = []
 
-    @torch.no_grad()
-    def reply(self, user_text: str) -> str:
-        """One turn: append user_text, generate a reply, append it, return it.
-
-        Note: this re-sends the full history as text on every call rather than
-        reusing a KV cache across turns, so cost grows with history length --
-        acceptable for this prototype's short exchanges (see max_history_turns),
-        but worth revisiting during the on-device optimization pass this repo defers.
-        """
+    def _build_prompt(self, user_text: str) -> str:
         system_content = SYSTEM_PROMPT
         if self.system_prompt_suffix:
             system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
@@ -86,15 +80,48 @@ class NobodyLLM:
             *self.history,
             {"role": "user", "content": user_text},
         ]
-
         # Qwen3 supports an explicit reasoning/thinking mode; off here since we
         # want short, fast, direct replies for a voice pipeline, not a scratchpad.
-        prompt = self.tokenizer.apply_chat_template(
+        return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
+
+    def _remember(self, user_text: str, reply_text: str) -> None:
+        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "assistant", "content": reply_text})
+        # Trim oldest turns first (2 messages/turn: user + assistant) -- see
+        # max_history_turns above.
+        max_messages = self.max_history_turns * 2
+        if len(self.history) > max_messages:
+            self.history = self.history[-max_messages:]
+
+    def reply(self, user_text: str) -> str:
+        """One turn: append user_text, generate a reply, append it, return it.
+
+        Delegates to reply_stream so the streaming and non-streaming paths can't
+        drift apart (same prompt, same history bookkeeping) -- callers that
+        don't want incremental output (run_pipeline.py, benchmark.py) just join
+        the stream.
+        """
+        return "".join(self.reply_stream(user_text))
+
+    def reply_stream(self, user_text: str) -> Iterator[str]:
+        """Same turn as reply(), but yields the reply in text pieces as the
+        model produces them (see pipeline.run_streaming / textchunk.py) instead
+        of only returning once the whole reply exists. History is updated once,
+        after the stream is exhausted.
+
+        Note: re-sends the full history as text every call (no cross-turn KV
+        cache) -- acceptable for this prototype's short exchanges (see
+        max_history_turns), worth revisiting in the deferred on-device pass.
+        """
+        prompt = self._build_prompt(user_text)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
 
-        out_ids = self.model.generate(
+        streamer = TextIteratorStreamer(
+            self.tokenizer, skip_prompt=True, skip_special_tokens=True
+        )
+        gen_kwargs = dict(
             **inputs,
             max_new_tokens=self.max_new_tokens,
             do_sample=True,
@@ -104,18 +131,26 @@ class NobodyLLM:
             temperature=0.7,
             top_p=0.9,
             pad_token_id=self.tokenizer.eos_token_id,
+            streamer=streamer,
         )
-        new_ids = out_ids[0, inputs["input_ids"].shape[1] :]
-        reply_text = self.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
 
-        self.history.append({"role": "user", "content": user_text})
-        self.history.append({"role": "assistant", "content": reply_text})
-        # Trim oldest turns first (2 messages/turn: user + assistant) -- see
-        # max_history_turns above.
-        max_messages = self.max_history_turns * 2
-        if len(self.history) > max_messages:
-            self.history = self.history[-max_messages:]
-        return reply_text
+        # generate() runs on a worker thread so this generator can yield the
+        # streamer's pieces as they arrive. torch.no_grad is thread-local, so
+        # it has to be entered inside the worker, not via a decorator here.
+        def _run():
+            with torch.no_grad():
+                self.model.generate(**gen_kwargs)
+
+        thread = Thread(target=_run, daemon=True)
+        thread.start()
+
+        pieces: list[str] = []
+        for text in streamer:
+            pieces.append(text)
+            yield text
+        thread.join()
+
+        self._remember(user_text, "".join(pieces).strip())
 
     @torch.no_grad()
     def generate_raw(
@@ -222,7 +257,7 @@ class NobodyLLMGguf:
     def reset(self):
         self.history = []
 
-    def reply(self, user_text: str) -> str:
+    def _build_prompt(self, user_text: str) -> str:
         system_content = SYSTEM_PROMPT
         if self.system_prompt_suffix:
             system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
@@ -231,11 +266,27 @@ class NobodyLLMGguf:
             *self.history,
             {"role": "user", "content": user_text},
         ]
-        prompt = self.tokenizer.apply_chat_template(
+        return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
 
-        out = self._llm.create_completion(
+    def _remember(self, user_text: str, reply_text: str) -> None:
+        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "assistant", "content": reply_text})
+        max_messages = self.max_history_turns * 2
+        if len(self.history) > max_messages:
+            self.history = self.history[-max_messages:]
+
+    def reply(self, user_text: str) -> str:
+        return "".join(self.reply_stream(user_text))
+
+    def reply_stream(self, user_text: str) -> Iterator[str]:
+        """Streaming counterpart of reply() -- yields text pieces as llama.cpp
+        decodes them. Same history bookkeeping, updated once after the stream
+        ends. See NobodyLLM.reply_stream for the shared rationale."""
+        prompt = self._build_prompt(user_text)
+
+        stream = self._llm.create_completion(
             prompt,
             max_tokens=self.max_new_tokens,
             temperature=0.7,
@@ -245,15 +296,17 @@ class NobodyLLMGguf:
             # (create_chat_completion() would normally stop here itself, but
             # we're deliberately not using it -- see class docstring).
             stop=["<|im_end|>"],
+            stream=True,
         )
-        reply_text = out["choices"][0]["text"].strip()
 
-        self.history.append({"role": "user", "content": user_text})
-        self.history.append({"role": "assistant", "content": reply_text})
-        max_messages = self.max_history_turns * 2
-        if len(self.history) > max_messages:
-            self.history = self.history[-max_messages:]
-        return reply_text
+        pieces: list[str] = []
+        for chunk in stream:
+            piece = chunk["choices"][0]["text"]
+            if piece:
+                pieces.append(piece)
+                yield piece
+
+        self._remember(user_text, "".join(pieces).strip())
 
     def generate_raw(
         self, system_prompt: str, user_text: str, max_new_tokens: int | None = None
