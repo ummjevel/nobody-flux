@@ -127,8 +127,10 @@ Turn v3**가 이미 공개돼 있다(8M, int8 ONNX ~8.7MB, CPU ~12ms, 한국어 
 
 ## 다음 단계
 
-- **마이크 실측 튜닝**: `_debug_vad_mic.py` 확장으로 `barge_in_confirm_ms`/`BACKCHANNEL_WORDS`/
-  `BACKCHANNEL_MAX_DURATION_S` + Smart Turn 엔드포인트(`complete_threshold`/`endpoint_grace_ms`)
-  확정. WSL2 마이크 불안정 → H100(네이티브 Linux)에서.
+- **마이크 실측 튜닝**: `scripts/_calibrate_turn_params.py`(맞장구/barge-in 샘플을 라벨링 녹음 →
+  지속시간 분포 → `barge_in_confirm_ms`/`BACKCHANNEL_MAX_DURATION_S` 제안·`--apply`)로 확정.
+  Smart Turn 엔드포인트는 이제 **적응형**(`vad._grace_frames_for_prob`, `P(complete)`로
+  `endpoint_grace_ms`↔`endpoint_grace_min_ms` 스케일 — Phase 2a) — `complete_threshold`/grace 범위도
+  같은 스크립트류로 확정. WSL2 마이크 불안정 → macOS 네이티브 마이크 또는 H100에서.
 - **훨씬 나중(스코프 밖)**: 풀-듀플렉스 종단간 음성 모델로 가면 VAD/turn detector 자체가 불필요.
   근본 아키텍처 변경이라 이 문서(캐스케이드 안 VAD 튜닝) 범위 밖.
