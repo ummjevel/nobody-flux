@@ -94,8 +94,34 @@ class VoiceActivityDetector:
     # mid-thought, didn't actually finish), this is how long to keep waiting
     # for them to resume before giving up and returning what we have anyway.
     # Bounds the "wait for continuation" so a wrong "incomplete" verdict can't
-    # hang the turn forever when the user really was done.
+    # hang the turn forever when the user really was done. Phase 2: this is now
+    # the UPPER bound of an *adaptive* grace -- a clearly mid-thought pause (low
+    # P(complete)) waits this long, a borderline one waits closer to
+    # endpoint_grace_min_ms (see _grace_frames_for_prob / adaptive_endpoint_grace).
     endpoint_grace_ms: int = 800
+    # Lower bound for the adaptive endpoint grace. A borderline-incomplete
+    # verdict (P(complete) just under the detector's threshold) waits about this
+    # long instead of the full endpoint_grace_ms, so a real end-of-turn the
+    # detector slightly under-scored isn't held up by the full pause budget.
+    endpoint_grace_min_ms: int = 300
+    # When False, endpoint grace is the fixed endpoint_grace_ms regardless of
+    # P(complete) (the pre-Phase-2 behavior).
+    adaptive_endpoint_grace: bool = True
+
+    def _grace_frames_for_prob(self, prob: float) -> int:
+        """How many frames of continued silence to wait for the user to resume,
+        scaled by Smart Turn's P(complete) for the just-finalized (incomplete)
+        segment. Lower prob (clearer mid-thought pause) -> wait longer, up to
+        endpoint_grace_ms; borderline -> down toward endpoint_grace_min_ms.
+        Linear in (1 - prob), clamped. adaptive_endpoint_grace=False pins it to
+        the fixed endpoint_grace_ms. This is the docs/voice-agent-oss-survey.md
+        'endpoint_grace_ms 적응화' item (LiveKit/Kyutai pattern)."""
+        if not self.adaptive_endpoint_grace:
+            grace_ms = self.endpoint_grace_ms
+        else:
+            span = max(0, self.endpoint_grace_ms - self.endpoint_grace_min_ms)
+            grace_ms = self.endpoint_grace_min_ms + span * (1.0 - max(0.0, min(1.0, prob)))
+        return max(1, int(grace_ms / FRAME_MS))
 
     def __post_init__(self):
         ten_vad_config = sherpa_onnx.TenVadModelConfig(
@@ -252,9 +278,13 @@ class VoiceActivityDetector:
                 if turn_detector is None:
                     return Utterance(audio=combined, sample_rate=SAMPLE_RATE)
 
-                is_complete, _prob = turn_detector.predict(combined, SAMPLE_RATE)
+                is_complete, prob = turn_detector.predict(combined, SAMPLE_RATE)
                 if is_complete or len(combined) >= max_samples:
                     return Utterance(audio=combined, sample_rate=SAMPLE_RATE)
                 # Incomplete: keep this audio and loop to capture the
-                # continuation (bounded by grace timeout above and max_samples).
+                # continuation. How long to wait for it (grace_frames, read by
+                # the inner loop above) is scaled by how incomplete it looked --
+                # a barely-incomplete verdict shouldn't hold a real end-of-turn
+                # for the full pause budget. Bounded by that grace and max_samples.
+                grace_frames = self._grace_frames_for_prob(prob)
                 carried = combined

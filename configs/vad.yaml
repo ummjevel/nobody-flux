@@ -29,3 +29,14 @@ num_threads: 1
 # (scripts/_debug_vad_mic.py) -- re-run that kind of check if barge-in feels
 # too trigger-happy or too sluggish in practice.
 barge_in_confirm_ms: 250
+
+# Phase 2 adaptive endpoint grace -- only in effect with talk.py --endpoint-detect
+# (Smart Turn v3). After an "incomplete turn" verdict, how long to wait in
+# continued silence for the user to resume before giving up is scaled by the
+# detector's P(complete): a clear mid-thought pause waits up to endpoint_grace_ms,
+# a borderline one down toward endpoint_grace_min_ms. Set adaptive_endpoint_grace
+# false to pin it at the fixed endpoint_grace_ms (pre-Phase-2 behavior). Not yet
+# mic-validated -- confirm the range on a real mic like the other VAD thresholds.
+endpoint_grace_ms: 800
+endpoint_grace_min_ms: 300
+adaptive_endpoint_grace: true
