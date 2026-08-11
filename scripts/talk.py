@@ -73,7 +73,7 @@ from src.nobody_flux.audio.player import SessionPlayer, StreamPlayer
 from src.nobody_flux.memory import consolidate_memories, extract_memories, format_recall_block
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
-from src.nobody_flux.turn.backchannel import is_backchannel
+from src.nobody_flux.turn.backchannel import is_backchannel, is_empty_transcript
 from src.nobody_flux.turn.controller import CapturedTurn, TurnController, TurnState
 from src.nobody_flux.turn.vad import VadEvent
 
@@ -90,6 +90,11 @@ WAIT_SLICE_S = 0.2
 # and both players already abandon a wedged device on their own. It is here so
 # that a bug somewhere below cannot strand the loop with the microphone open.
 PLAYBACK_WAIT_CAP_S = 120.0
+
+# Consecutive empty turns before saying the microphone is probably the problem.
+# Three, because one is a stray noise and two is bad luck, but a third in a row
+# has never yet been anything but a dead input.
+EMPTY_TURN_WARNING_AT = 3
 
 # Spoken once at session start, after the models finish loading. Audible
 # confirmation that the session is ready and listening -- without it the first
@@ -300,6 +305,10 @@ class ConversationSession:
         self.audio_dir = SESSION_AUDIO_DIR / str(self.session_id)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.turns_handled = 0
+        # Consecutive turns that recognized nothing. Reset by any real turn, so
+        # this counts a run rather than a total -- one empty turn is a stray
+        # noise, several in a row is a broken input device.
+        self.empty_turns = 0
 
     # -- setup -------------------------------------------------------------
 
@@ -401,9 +410,13 @@ class ConversationSession:
             pretranscribed=turn.streamed_text,
             on_stage_start=lambda stage: logger.info(STAGE_LABELS[stage]),
             on_result=self._log_stage_result,
-            # Stage 2 backchannel filter: a short utterance that transcribes to
-            # a bare "어"/"응" is not worth an LLM call and is not a turn.
-            should_continue_after_asr=lambda text: not is_backchannel(text, turn.duration_s),
+            # Two reasons to stop before the LLM. An empty transcript means
+            # recognition found no words at all and there is nothing to answer;
+            # a bare "어"/"응" is backchannel, which docs/barge-in-design.md
+            # calls stage 2. Both cost an LLM call and a stored turn otherwise.
+            should_continue_after_asr=lambda text: not (
+                is_empty_transcript(text) or is_backchannel(text, turn.duration_s)
+            ),
             # Phase 4: polled between LLM deltas, so an interruption lands
             # during generation rather than after it.
             should_cancel=lambda: self.controller.cancelled,
@@ -429,8 +442,27 @@ class ConversationSession:
             logger.info("[playback] reply interrupted")
             return
         if summary.get("skipped"):
-            logger.info(f"[VAD] backchannel ignored: {summary['user_text']!r}")
+            text = summary["user_text"]
+            if is_empty_transcript(text):
+                # Say what was actually captured, not just that it was ignored.
+                # A run of these is the signature of a microphone that has gone
+                # silent -- the VAD keeps reporting speech, because near-zero
+                # input is degenerate for it, so without a level here the
+                # session looks busy while recognizing nothing.
+                logger.info(
+                    f"[VAD] 인식된 말 없음 ({turn.duration_s:.1f}s, "
+                    f"레벨 {self._level(turn):.4f}) — 무시"
+                )
+                self.empty_turns += 1
+                if self.empty_turns == EMPTY_TURN_WARNING_AT:
+                    logger.warning(
+                        f"빈 턴이 {EMPTY_TURN_WARNING_AT}번 연속이야. 마이크가 음소거됐거나 "
+                        "다른 앱이 잡고 있을 수 있어 — 윈도우 소리 설정에서 입력 장치를 확인해줘."
+                    )
+            else:
+                logger.info(f"[VAD] backchannel ignored: {text!r}")
             return
+        self.empty_turns = 0
 
         logger.info(
             f"[timing] asr={summary['asr_ms']}ms llm={summary['llm_ms']}ms "
@@ -456,6 +488,16 @@ class ConversationSession:
             tts_ms=summary["tts_ms"],
         )
         self.turns_handled += 1
+
+    @staticmethod
+    def _level(turn: CapturedTurn) -> float:
+        """RMS of the captured audio. Only used for reporting -- the decision to
+        skip is made on the transcript, which is the condition that actually
+        matters; this is here so the log says *why* recognition found nothing."""
+        audio = turn.utterance.audio
+        if audio.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(audio.astype("float64") ** 2)))
 
     @staticmethod
     def _log_stage_result(stage: str, text: str, elapsed_ms: int) -> None:

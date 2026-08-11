@@ -40,6 +40,31 @@ def _normalize(text: str) -> str:
     return text.strip().strip(".!?~,")
 
 
+def is_empty_transcript(text: str) -> bool:
+    """True if ASR came back with nothing worth replying to.
+
+    Recognizers do not return an empty string for silence; they return
+    punctuation. A live session where the microphone had gone silent produced
+    six turns transcribed as ``'.'``, ``'그.'``, ``'예.'`` -- and the LLM
+    answered every one of them, repeating its previous reply verbatim because
+    there was no new content to respond to. From the outside that reads as the
+    assistant having lost its mind, when in fact it was being handed nothing.
+
+    Guarding on the transcript rather than on the audio level is deliberate:
+    "the recognizer found no words" is the condition that actually matters, and
+    it holds whether the cause was a muted microphone, a stray noise, or speech
+    too quiet to decode. An audio-level threshold would additionally have to be
+    right for every microphone and room, and would still not catch a clear
+    recording of a door closing.
+
+    A single character is included because that is what a bare syllable
+    fragment looks like ("그"), and one syllable carries no answerable content.
+    Anything genuinely meant as a one-word reply ("네", "응") is caught by
+    is_backchannel below, which skips the turn for the same reason.
+    """
+    return len(_normalize(text)) <= 1
+
+
 def is_backchannel(text: str, duration_s: float) -> bool:
     """True if `text` (an ASR transcript) together with the utterance's
     `duration_s` looks like backchannel rather than a real conversational
