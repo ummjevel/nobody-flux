@@ -14,7 +14,7 @@ from threading import Thread
 from typing import Iterator
 
 from ..paths import PROJECT_ROOT
-from ..persona import SYSTEM_PROMPT
+from ..persona import FEWSHOT_MESSAGES, SYSTEM_PROMPT
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 
@@ -124,6 +124,11 @@ class NobodyLLM:
             system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
         messages = [
             {"role": "system", "content": system_content},
+            # Ahead of the real history, so the model has seen the tone
+            # demonstrated before it sees anything the user actually said. See
+            # persona.FEWSHOT_MESSAGES for why demonstration beats description
+            # at this model size.
+            *FEWSHOT_MESSAGES,
             *self.history,
             {"role": "user", "content": user_text},
         ]
@@ -320,6 +325,11 @@ class NobodyLLMGguf:
             system_content = f"{SYSTEM_PROMPT}\n\n{self.system_prompt_suffix}"
         messages = [
             {"role": "system", "content": system_content},
+            # Ahead of the real history, so the model has seen the tone
+            # demonstrated before it sees anything the user actually said. See
+            # persona.FEWSHOT_MESSAGES for why demonstration beats description
+            # at this model size.
+            *FEWSHOT_MESSAGES,
             *self.history,
             {"role": "user", "content": user_text},
         ]

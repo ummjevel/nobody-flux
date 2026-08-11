@@ -28,7 +28,21 @@ threshold: 0.5
 min_silence_duration: 0.5
 min_speech_duration: 0.15
 max_speech_duration: 20.0
-pre_roll_ms: 300
+# How much audio before the VAD's detected onset is prepended to the captured
+# utterance, to recover the head of the word the VAD needed a few frames to be
+# sure about.
+#
+# Raised from 300 after a live session lost one: the turn "산책 코스 추천해줘"
+# came back as "코 추천해 줘", and measuring the saved capture showed speech
+# beginning at 0ms -- there was no lead-in left at all. A soft onset (the ㅅ
+# fricative here) gives TEN-VAD little to trigger on, so detection lands well
+# after the true start even when the speaker is at a normal level.
+#
+# 500 rather than more because the cost is real but small (every capture carries
+# 200ms more audio into ASR) and the benefit saturates: replayed at 0.25/0.15/
+# 0.08 peak through the same VadStream, 300/500/800 all transcribe identically,
+# so this is insurance against soft onsets rather than a general accuracy gain.
+pre_roll_ms: 500
 num_threads: 1
 
 # docs/barge-in-design.md's stage 1 (delayed-stop): how long speech has to
