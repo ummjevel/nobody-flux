@@ -290,6 +290,18 @@ class NobodyLLMGguf:
     # template the same way NobodyLLM does -- see class docstring. Must
     # match the GGUF's source checkpoint's template, not an arbitrary choice.
     tokenizer_id: str = DEFAULT_MODEL_ID
+    # Turn boundary tokens to stop generation on. Defaults to ChatML's, which is
+    # what Qwen uses; every model family spells this differently (EXAONE
+    # "[|endofturn|]", Gemma "<end_of_turn>"), and getting it wrong does not
+    # error -- the model simply runs on past its reply, inventing the user's
+    # next line, until max_tokens. A preset that swaps the model must swap this
+    # too, which is why it is a field rather than a constant.
+    stop: list[str] = field(default_factory=lambda: ["<|im_end|>"])
+    # Extra arguments for apply_chat_template. enable_thinking=False is Qwen3's
+    # switch for suppressing its <think> block (see the class docstring); other
+    # families neither need nor accept it, so _build_prompt drops these if the
+    # template rejects them.
+    template_kwargs: dict = field(default_factory=lambda: {"enable_thinking": False})
     n_ctx: int = 4096
     n_threads: int = 8
     # 0 = CPU only (default, works everywhere incl. CM4). On Apple Silicon set
@@ -333,9 +345,31 @@ class NobodyLLMGguf:
             *self.history,
             {"role": "user", "content": user_text},
         ]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-        )
+        return self._render(messages)
+
+    def _render(self, messages: list[dict]) -> str:
+        """Apply the model's own chat template to a message list.
+
+        Shared by the conversational path and generate_raw so a preset's
+        template settings cannot apply to one and not the other -- they diverged
+        once already, which is the kind of bug that shows up as one code path
+        mysteriously ignoring the model's turn markers.
+        """
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, **self.template_kwargs
+            )
+        except (TypeError, ValueError):
+            # A template that rejects one of the extra kwargs, or one with no
+            # system role (Gemma raises ValueError for that). enable_thinking is
+            # Qwen's; passing it to a template that does not declare it can be a
+            # hard error rather than a no-op. Retry plainly rather than make
+            # every non-Qwen preset remember to clear the field.
+            if not self.template_kwargs:
+                raise
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
 
     def _remember(self, user_text: str, reply_text: str) -> None:
         self.history.append({"role": "user", "content": user_text})
@@ -358,11 +392,11 @@ class NobodyLLMGguf:
             max_tokens=self.max_new_tokens,
             temperature=0.7,
             top_p=0.9,
-            # ChatML turn boundary -- without this, raw create_completion()
-            # keeps generating past the reply into a hallucinated next turn
+            # Turn boundary -- without it, raw create_completion() keeps
+            # generating past the reply into a hallucinated next turn
             # (create_chat_completion() would normally stop here itself, but
             # we're deliberately not using it -- see class docstring).
-            stop=["<|im_end|>"],
+            stop=self.stop,
             stream=True,
         )
 
@@ -386,13 +420,11 @@ class NobodyLLMGguf:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ]
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-        )
+        prompt = self._render(messages)
         out = self._llm.create_completion(
             prompt,
             max_tokens=max_new_tokens or self.max_new_tokens,
             temperature=0.0,
-            stop=["<|im_end|>"],
+            stop=self.stop,
         )
         return out["choices"][0]["text"].strip()

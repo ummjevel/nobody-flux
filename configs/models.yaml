@@ -60,6 +60,54 @@ llm:
     class: NobodyLLMGguf
     params: {}  # every field already defaults to the right paths/model
 
+  # --- Larger on-device candidates (2026-08 LLM 고도화) --------------------
+  # All Q4_K_M GGUF on llama.cpp, i.e. the same CPU path the CM4 target uses.
+  # The shortlist stops around 2B parameters for that reason: a model that only
+  # behaves well on this desktop is not a candidate for a board with no GPU.
+  #
+  # Compare them with scripts/_ab_persona.py, which scores persona adherence
+  # (반말/이모지/앵무새/숫자) and turn latency together -- either one alone
+  # picks the wrong model.
+
+  # Same family as the default, one size up. Lowest-risk swap: identical chat
+  # template, identical stop token, same thinking-mode switch.
+  qwen3-1.7b-gguf:
+    class: NobodyLLMGguf
+    params:
+      model_path: models/qwen3-1.7b-gguf/Qwen_Qwen3-1.7B-Q4_K_M.gguf
+      tokenizer_id: Qwen/Qwen3-1.7B
+
+  # Kakao Kanana Nano 2.1B, Korean-first pretraining rather than Korean as one
+  # language among many -- which is the actual weakness being addressed here.
+  # Llama-3 style template, so the turn boundary is <|eot_id|>, not ChatML's.
+  # Apache-2.0.
+  kanana-2.1b-gguf:
+    class: NobodyLLMGguf
+    params:
+      model_path: models/kanana-2.1b-gguf/kanana-nano-2.1b-instruct-q4_k_m.gguf
+      tokenizer_id: kakaocorp/kanana-nano-2.1b-instruct
+      stop: ["<|eot_id|>"]
+      template_kwargs: {}
+
+  # LG EXAONE 3.5 2.4B, also Korean-first, and the largest thing on the
+  # shortlist. NOTE THE LICENSE: EXAONE AI Model License 1.1-NC is
+  # non-commercial research only. Fine for evaluating what a Korean-tuned model
+  # of this size can do; not something this project could ship. Kept as a
+  # reference point rather than a deployment candidate.
+  exaone-2.4b-gguf:
+    class: NobodyLLMGguf
+    params:
+      model_path: models/exaone-2.4b-gguf/EXAONE-3.5-2.4B-Instruct-Q4_K_M.gguf
+      tokenizer_id: LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct
+      stop: ["[|endofturn|]"]
+      template_kwargs: {}
+
+  # Naver HyperCLOVAX-SEED 1.5B was the other Korean-first candidate and is NOT
+  # here: the tokenizer repo is gated (HTTP 401), and this project renders
+  # prompts with the model's own chat template via transformers, so a GGUF
+  # without an accessible tokenizer cannot be driven. Revisit if access is
+  # granted, or by reading the template embedded in the GGUF itself.
+
   # Second candidate, added for comparison -- see docs/output/
   # ondevice_asr_llm_tts_research_20260716.md's LLM section update.
   # LiquidAI/LFM2-350M: hybrid conv+attention architecture designed
