@@ -96,6 +96,11 @@ PLAYBACK_WAIT_CAP_S = 120.0
 # has never yet been anything but a dead input.
 EMPTY_TURN_WARNING_AT = 3
 
+# Same idea for streaming ASR falling back to the batch stage. Two is enough
+# here: unlike a stray noise, there is no benign reason for the streaming
+# recognizer to return nothing for a turn the VAD considered real.
+STREAMING_EMPTY_WARNING_AT = 2
+
 # Spoken once at session start, after the models finish loading. Audible
 # confirmation that the session is ready and listening -- without it the first
 # sign of life is silence until you happen to say something the VAD catches,
@@ -309,6 +314,9 @@ class ConversationSession:
         # this counts a run rather than a total -- one empty turn is a stray
         # noise, several in a row is a broken input device.
         self.empty_turns = 0
+        # Consecutive turns where streaming ASR was attached but returned
+        # nothing, so the batch stage had to do the work after all.
+        self.streaming_empty = 0
 
     # -- setup -------------------------------------------------------------
 
@@ -368,6 +376,7 @@ class ConversationSession:
                 f"[VAD] turn captured ({turn.duration_s:.1f}s)"
                 + (f' streamed="{turn.streamed_text}"' if turn.streamed_text else "")
             )
+            self._note_streaming_asr(turn)
             player = self.controller.begin_response()
             try:
                 self.handle_turn(turn, player)
@@ -384,6 +393,35 @@ class ConversationSession:
                 wait_for_playback(player, limit_s=PLAYBACK_WAIT_CAP_S)
             finally:
                 self.controller.finish_response()
+
+    def _note_streaming_asr(self, turn: CapturedTurn) -> None:
+        """Say so when streaming ASR was asked for and produced nothing.
+
+        pipeline.run_streaming falls back to the batch ASR stage whenever
+        streamed text is absent, which is the right behaviour -- but it was
+        completely silent about it. A live session ran with --streaming-asr and
+        transcribed every single turn through the batch path instead, and the
+        only trace was an `asr=48ms` where a working streaming path would have
+        shown `asr=0ms`. The flag said enabled, the log said nothing, and the
+        feature was not running.
+
+        A degraded mode that looks identical to a working one is worse than a
+        broken one, because nobody goes looking.
+        """
+        if self.controller.transcriber is None:
+            return
+        if turn.streamed_text:
+            self.streaming_empty = 0
+            return
+
+        self.streaming_empty += 1
+        logger.info("[turn] 스트리밍 인식 결과 없음 — 배치 ASR로 처리")
+        if self.streaming_empty == STREAMING_EMPTY_WARNING_AT:
+            logger.warning(
+                f"스트리밍 ASR이 {STREAMING_EMPTY_WARNING_AT}번 연속 빈 결과야. "
+                "streaming-zipformer 체크포인트는 짧은 실제 발화에 약해 (docs/FEATURES.md "
+                "참고) — 지금은 --streaming-asr 없이 돌리는 게 나아."
+            )
 
     def handle_turn(self, turn: CapturedTurn, player) -> None:
         """Generate and speak one reply, then record what happened.
