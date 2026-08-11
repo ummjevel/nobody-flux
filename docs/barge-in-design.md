@@ -6,18 +6,21 @@
 
 ## 요약
 
-- **구현**: `vad.py`의 `barge_in_confirm_ms`/`on_barge_in_confirmed`(1단계) +
-  `backchannel.py`의 `is_backchannel()`(2단계) + `pipeline.py`의 `should_continue_after_asr` 훅으로
-  `talk.py`에 연결.
-- **검증**: `is_backchannel()` 단위 케이스 + `pipeline.run()`이 backchannel 판정 시 LLM 미호출을
-  end-to-end 확인 — 통과. **마이크 실사용 파라미터 튜닝은 아직**(WSL2 마이크 불안정, H100에서 할 것).
+- **구현**: `turn/vad.py`의 `barge_in_confirm_ms`/`VadEvent.BARGE_IN_CONFIRMED`(1단계) +
+  `turn/backchannel.py`의 `is_backchannel()`(2단계) + `pipeline.py`의 `should_continue_after_asr` 훅.
+  연결은 `turn/controller.py`(재생 취소)와 `scripts/talk.py`(턴 스킵)가 나눠 맡는다.
+- **검증**: `is_backchannel()` 단위 케이스 + backchannel 판정 시 LLM 미호출 end-to-end 확인 — 통과.
+  **`barge_in_confirm_ms`와 `BACKCHANNEL_MAX_DURATION_S`는 여전히 추정치** — 실제 맞장구/끼어들기
+  발화를 녹음해야 정해진다(`scripts/_calibrate_turn_params.py`, 네이티브 윈도우/macOS에서).
 - **Smart Turn v3**: 원래 backchannel 필터 대체로 붙였으나 실측상 부적합(end-of-turn 모델) →
-  엔드포인트 감지로 재활용(옵트인, 마이크 미검증).
+  엔드포인트 감지로 재활용(옵트인). Phase 2a에서 `P(complete)` 기반 적응형 grace로 확장.
+- **생성 구간 barge-in (Phase 4)**: 이 문서를 처음 쓸 땐 응답 *재생* 중에만 끼어들기가 잡혔다.
+  지금은 캡처가 전용 스레드에서 계속 돌아 **생성 중에도 잡힌다** — `turn/controller.py` 참고.
 
 ## 왜 문제가 되나
 
 `persona.py`의 퀜은 캐주얼 반말 페르소나라 사용자가 "어/응/오/진짜?/그렇구나" 같은 맞장구를
-자주 낸다. `vad.py`의 `min_speech_duration`이 0.15초로 낮은 이유도 "이런 짧은 발화를 놓치지 말자"
+자주 낸다. `turn/vad.py`의 `min_speech_duration`이 0.15초로 낮은 이유도 "이런 짧은 발화를 놓치지 말자"
 였다. 그런데 초기 barge-in 구현은 그 짧은 발화가 감지되는 순간 무조건 재생을 끊어서 — 맞장구만
 쳐도 퀜이 말을 하다 뚝 끊기는 어색한 경험이 됐다.
 
@@ -37,8 +40,10 @@
 **`barge_in_confirm_ms`(250ms) 동안 계속 말하는 중이면 그때 재생을 끊는다.** 맞장구는 대개 이 창
 안에서 끝나 재생이 안 끊기고, 진짜 끼어들기는 창을 넘겨 자연스럽게 걸린다.
 
-- `vad.py`: `listen_for_utterance`에 콜백 두 개 — `on_speech_start`(UI 로그) +
-  `on_barge_in_confirmed`(지속시간 조건 충족 시 1회). `talk.py`는 후자에서만 `sd.stop()`.
+- `turn/vad.py`: `VadStream.push()`가 이벤트를 yield한다 — `SPEECH_STARTED`(UI 로그) +
+  `BARGE_IN_CONFIRMED`(지속시간 조건 충족 시 턴당 1회). 재생을 끊는 건 후자뿐이다.
+  (초안에선 `listen_for_utterance`의 콜백 두 개였다. 이벤트 스트림으로 바꾼 건 Phase 4에서
+  캡처가 블로킹을 그만두면서다 — 응답 생성 중에도 프레임을 계속 읽어야 했으므로.)
 - `configs/vad.yaml`: `barge_in_confirm_ms` (코드 안 건드리고 yaml만).
 - 트레이드오프: 진짜 barge-in 반응이 250ms쯤 늦어짐. 대신 AEC 없는 환경의 오탐(자기 응답에 스스로
   끼어듦) 위험도 줄어 나쁘지 않은 교환.
@@ -51,7 +56,7 @@
 (`duration_s < BACKCHANNEL_MAX_DURATION_S`) **새 대화 턴으로 처리하지 않는다** — LLM/`log_turn`
 스킵, 로그만 남기고 다음 청취로.
 
-- `src/nobody_flux/backchannel.py`: `BACKCHANNEL_WORDS` 집합(normalize 후 정확 매칭) +
+- `src/nobody_flux/turn/backchannel.py`: `BACKCHANNEL_WORDS` 집합(normalize 후 정확 매칭) +
   `is_backchannel(text, duration_s)`. 순수 함수라 단위 테스트 쉬움.
 - **gray zone(알려진 한계)**: 250ms 넘게 길게 끈 맞장구("그으으래?")는 1단계에서 이미 재생이
   끊긴 뒤라 복구 불가(오디오 이어붙이기는 스코프 밖) → 그냥 일반 턴으로 처리(침묵보다 나음).
@@ -78,7 +83,7 @@ BACKCHANNEL_MAX_DURATION_S = 0.6
 
 "소형 오디오 분류기는 학습 데이터 필요 → 스코프 밖"이라던 전제가 틀렸다. pipecat-ai의 **Smart
 Turn v3**가 이미 공개돼 있다(8M, int8 ONNX ~8.7MB, CPU ~12ms, 한국어 포함, BSD-2). 이걸 2단계
-어휘 필터 대체로 붙여봤다(`src/nobody_flux/turn_detector.py`).
+어휘 필터 대체로 붙여봤다(`src/nobody_flux/turn/detector.py`).
 
 **실측 결과 backchannel 구분엔 안 맞았다** (합성 음성, prob_complete = "완결된 턴일 확률"):
 
