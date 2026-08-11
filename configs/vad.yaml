@@ -4,16 +4,27 @@
 # See VoiceActivityDetector's own docstring/field comments for what each one
 # does and why its default is what it is.
 
-# 0.5 (TenVadModelConfig's own stock default) missed real speech entirely on
-# this dev box's mic (WSL2/WSLg PulseAudio passthrough) -- confirmed by hand
-# with scripts/_debug_vad_mic.py: a captured utterance with normal speech-level
-# RMS (0.04-0.10, not clipped) never crossed 0.5 confidence, while sweeping
-# threshold down showed detection kicks in reliably at 0.3 and stays reliable
-# below that. Lowered with a small safety margin under the confirmed working
-# point, not down at the floor (0.05) where background noise false-positives
-# become more likely -- if this mic/room still under- or over-triggers,
-# re-run that debug script rather than guessing at a new number.
-threshold: 0.25
+# Measured on the native-Windows box's USB microphone with
+# scripts/_calibrate_vad_threshold.py (real room tone as the negative case, a
+# known utterance mixed onto it as the positive one):
+#
+#   thresh   room frames flagged speech   segment closes after speech ends
+#     0.25              97.3%             never (max_speech_duration forces it)
+#     0.30              27.2%             -- (fragments the utterance)
+#     0.40               0.0%             1.68s
+#     0.50               0.0%             0.81s
+#
+# This replaces an earlier 0.25, which had been lowered because TEN-VAD missed
+# speech on the old WSL2/WSLg passthrough mic. On real hardware that value is
+# actively broken: at 0.25 the model reports speech through *silence*, so the
+# segment never finalizes and the turn never ends -- the user speaks and gets
+# no reply at all. Detection was never the real problem; at 0.5 this mic
+# detects the reference utterance down to peak 0.04 (SNR 2.9 dB, i.e. clearly
+# quiet speech) with onset landing within 0.04s of the true one.
+#
+# Device dependent, so re-run the calibration script rather than copying this
+# number to a different microphone -- both failure directions are real.
+threshold: 0.5
 min_silence_duration: 0.5
 min_speech_duration: 0.15
 max_speech_duration: 20.0

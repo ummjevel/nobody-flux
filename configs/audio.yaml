@@ -20,4 +20,4 @@ backend: auto
 # Speaker->mic acoustic round-trip delay, in 30ms frames, used to align the
 # reference for the gate-style canceller (Speex models the delay itself).
 # scripts/_calibrate_aec_delay.py measures the real value and rewrites this.
-delay_frames: 4
+delay_frames: 1
