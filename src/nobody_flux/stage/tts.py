@@ -58,7 +58,8 @@ import sherpa_onnx  # noqa: E402 -- see asr.py's module docstring for why this n
 import soundfile as sf  # noqa: E402
 
 from ._procio import LineReader, StderrDrainer, clean_subprocess_env
-from .paths import PROJECT_ROOT
+from ..paths import PROJECT_ROOT
+from ..platform_support import venv_interpreter
 
 MOSS_TTS_NANO_REPO = PROJECT_ROOT / "external" / "MOSS-TTS-Nano"
 DEFAULT_REFERENCE_AUDIO = PROJECT_ROOT / "data" / "reference_voice_16k.wav"
@@ -106,7 +107,10 @@ class NobodyTTS:
     timeout_seconds: float = 120.0
 
     def _interpreter(self) -> str:
-        venv_python = self.repo_dir / ".venv" / "bin" / "python"
+        # venv_interpreter, not a hard-coded "bin/python": that layout is POSIX
+        # only, and this project now also runs on native Windows, where the
+        # executable lives at Scripts/python.exe.
+        venv_python = venv_interpreter(self.repo_dir / ".venv")
         if venv_python.exists():
             return str(venv_python)
         warnings.warn(
@@ -202,7 +206,7 @@ class FreyaTtsKo:
         self._stderr_drainer: StderrDrainer | None = None
 
     def _interpreter(self) -> str:
-        venv_python = self.venv_dir / "bin" / "python"
+        venv_python = venv_interpreter(self.venv_dir)
         if not venv_python.exists():
             raise FileNotFoundError(
                 f"No freyatts venv at {venv_python}. Create it with "

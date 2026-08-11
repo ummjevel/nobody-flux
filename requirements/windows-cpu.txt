@@ -1,0 +1,65 @@
+# Native-Windows dependency set for the `.venv-win` environment.
+#
+# Why this file exists at all, instead of just `uv sync` against pyproject.toml:
+# pyproject.toml describes the WSL2/Linux + H100 development environment, and
+# three of its dependencies are either unavailable or pointless on native
+# Windows --
+#
+#   torchcodec   no Windows wheels (it wants a system FFmpeg build); nothing in
+#                src/ imports it, it was only ever pulled in for the Linux
+#                transformers audio path.
+#   torchaudio   likewise unused by src/ (audio I/O goes through soundfile).
+#   accelerate   only meaningful for the multi-GPU/offload paths this CPU-only
+#                environment deliberately doesn't take.
+#
+# ...and one (torch) must come from a different index to avoid silently
+# dragging in a ~3GB bundled CUDA runtime we don't want here. Keeping the
+# Windows set in its own file means the Linux lockfile (uv.lock) stays
+# authoritative for the environment it was solved for, and neither platform's
+# install can quietly perturb the other's.
+#
+# Installed by scripts/setup_windows.ps1, which passes the two extra indexes
+# these packages need (see that script). Do not `pip install -r` this by hand
+# without those indexes -- torch would resolve to the CUDA build and
+# llama-cpp-python would try to compile from source.
+
+# --- Core pipeline runtime -------------------------------------------------
+# sherpa-onnx carries the ASR (SenseVoice), TTS (Matcha) and VAD (TEN-VAD)
+# stages; onnxruntime is both its backend and Smart Turn v3's.
+sherpa-onnx>=1.13.4
+onnxruntime>=1.27.0
+numpy>=2.4.6
+
+# --- Audio I/O -------------------------------------------------------------
+# sounddevice binds PortAudio, which on Windows reaches WASAPI/MME/DirectSound.
+# This is the reason the Windows environment exists: unlike WSL2's WSLg
+# passthrough, these are real, low-latency, natively-enumerated devices, so the
+# live mic loop (and therefore every turn-taking parameter in configs/vad.yaml)
+# can finally be measured instead of estimated.
+sounddevice>=0.5.1
+soundfile>=0.14.0
+
+# --- LLM stage -------------------------------------------------------------
+# The default preset (qwen3-0.6b-gguf) runs through llama-cpp-python. Comes
+# from the project's prebuilt CPU wheel index -- from PyPI this is an sdist
+# that needs MSVC + CMake to build, neither of which this box has.
+llama-cpp-python>=0.3.34
+
+# torch is needed only by the raw-transformers LLM presets (qwen3-0.6b,
+# lfm2-*). The default GGUF preset never touches it, and src/ imports it
+# lazily, so a broken/absent torch degrades to "those presets unavailable"
+# rather than "nothing imports". CPU build on purpose: the CM4 target has no
+# GPU, so CPU numbers measured here are the ones that actually transfer.
+torch>=2.6.0
+
+# transformers supplies Smart Turn v3's Whisper log-mel frontend
+# (WhisperFeatureExtractor) in addition to the raw-transformers LLM presets.
+# Pinned to match pyproject.toml so both environments run identical
+# tokenization/feature code.
+transformers==4.57.1
+
+# --- Support ---------------------------------------------------------------
+pyyaml>=6.0
+loguru>=0.7.3
+huggingface-hub<1.0
+sentencepiece>=0.2.2

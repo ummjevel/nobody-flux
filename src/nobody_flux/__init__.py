@@ -1,22 +1,63 @@
-import os
-import platform
+"""nobody-flux: a fully local ASR -> LLM -> TTS voice conversation pipeline.
 
-# macOS: torch, onnxruntime, llama.cpp and sherpa-onnx each link their own
-# libomp.dylib; whichever OpenMP runtime initializes second aborts the process
-# with "OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib
-# already initialized." (confirmed on Apple Silicon). This is the documented
-# workaround, and it must be set BEFORE any of those native libs load their
-# OpenMP -- this package __init__ runs before its own submodules
-# (asr/llm/tts import torch/sherpa/llama), so setting it here is early enough.
-# setdefault so an explicit env override still wins; scoped to macOS so Linux/
-# CM4 behavior is untouched.
-if platform.system() == "Darwin":
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    # KMP_DUPLICATE_LIB_OK lets the process past the "OMP Error #15" abort, but
-    # its documented side effect is that the two OpenMP runtimes can then HANG
-    # (or corrupt results) fighting over threads -- observed as llama.cpp's
-    # generate() deadlocking on Apple Silicon. Pinning OpenMP to a single thread
-    # avoids that contention. llama.cpp's own matmul uses ggml's separate thread
-    # pool (n_threads), not OpenMP, so this doesn't slow the LLM; it only reins
-    # in the OpenMP-using libs (torch etc.) that caused the conflict.
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+Package layout
+--------------
+
+The modules are grouped by *what they are responsible for during a turn*,
+rather than left flat:
+
+``stage/``
+    The three swappable model stages -- ``asr``, ``llm``, ``tts`` -- plus
+    ``asr_stream`` (live incremental recognition) and ``_procio`` (the
+    subprocess plumbing the isolated-venv backends share). These are the parts
+    ``configs/models.yaml`` chooses between; nothing here knows about turns,
+    devices, or conversation state.
+
+``audio/``
+    Everything that touches a sound device: ``session`` (duplex capture +
+    playback backends), ``aec`` (frame-level echo cancellers), ``player``
+    (reply playback queues) and ``resample``. Deals in samples, never text.
+
+``turn/``
+    Turn-taking: ``vad`` (speech boundaries), ``detector`` (Smart Turn v3
+    endpointing), ``backchannel`` (lexical "is this a real turn?" filter) and
+    ``controller`` (the state machine that drives a live conversation).
+
+Top level keeps what does not belong to any one of those: ``pipeline`` (stage
+orchestration), ``registry`` (config -> object construction), ``storage`` and
+``memory`` (persistence), ``persona``, ``textchunk``, ``paths`` and
+``platform_support``.
+
+Import cost
+-----------
+
+This module deliberately does **not** re-export anything from the
+subpackages. Importing ``nobody_flux`` should be nearly free: the heavy
+dependencies (torch, sherpa-onnx, llama-cpp) each cost hundreds of
+milliseconds to a couple of seconds to load, and a caller that only wants,
+say, ``textchunk`` should not pay for all three. Import the specific module
+you need -- ``from nobody_flux.turn.vad import VoiceActivityDetector`` -- and
+you load exactly its dependencies.
+
+The one thing that *must* happen at package import is native-runtime
+preparation, below.
+"""
+
+from __future__ import annotations
+
+from .platform_support import prepare_native_runtime
+
+# Runs before any submodule of this package can be imported, which is exactly
+# the ordering guarantee the native setup needs: it registers DLL directories
+# (Windows), symlinks onnxruntime's shared library where sherpa-onnx looks for
+# it (Linux/macOS), and pins the OpenMP environment variables that keep macOS
+# from aborting on a duplicate libomp. Every one of those has to be in place
+# *before* `import sherpa_onnx` / `import torch` / `import llama_cpp` runs.
+#
+# It is idempotent and cheap (a handful of directory checks), imports nothing
+# heavier than the standard library, and is a no-op on platforms that need no
+# fixups -- so paying for it unconditionally at package import is the right
+# trade for never having to think about import order again.
+prepare_native_runtime()
+
+__all__ = ["prepare_native_runtime"]

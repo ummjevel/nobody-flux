@@ -19,14 +19,18 @@ from typing import Any
 
 import yaml
 
-from . import asr, audio, llm, tts, turn_detector, vad
+from .audio import session as audio_session
 from .paths import PROJECT_ROOT
+from .stage import asr, llm, tts
+from .turn import detector as turn_detector
+from .turn import vad
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "models.yaml"
 VOICES_CONFIG_PATH = PROJECT_ROOT / "configs" / "voices.yaml"
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 TURN_DETECTOR_CONFIG_PATH = PROJECT_ROOT / "configs" / "turn_detector.yaml"
 AUDIO_CONFIG_PATH = PROJECT_ROOT / "configs" / "audio.yaml"
+STREAMING_ASR_CONFIG_PATH = PROJECT_ROOT / "configs" / "streaming_asr.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -160,7 +164,7 @@ def build_vad(**overrides) -> vad.VoiceActivityDetector:
     return vad.VoiceActivityDetector(**config)
 
 
-def build_audio_session(backend: str | None = None) -> audio.AudioSession:
+def build_audio_session(backend: str | None = None) -> audio_session.AudioSession:
     """Build the duplex/AEC audio session for talk.py's mic loop from
     configs/audio.yaml (see audio.py). `backend` overrides the yaml's `backend`
     field (e.g. from talk.py's --aec); 'auto' resolves per platform + installed
@@ -169,8 +173,36 @@ def build_audio_session(backend: str | None = None) -> audio.AudioSession:
     stream isn't opened until .start()."""
     config = _load_yaml(AUDIO_CONFIG_PATH)
     prefer = backend or config.get("backend", "auto")
-    resolved = audio.select_backend(prefer)
-    return audio.build_session(resolved, delay_frames=int(config.get("delay_frames", 4)))
+    resolved = audio_session.select_backend(prefer)
+    return audio_session.build_session(
+        resolved, delay_frames=int(config.get("delay_frames", 4))
+    )
+
+
+def build_streaming_transcriber(**overrides):
+    """Build the Phase 3 live recognizer from configs/streaming_asr.yaml.
+
+    Same flat-config pattern as build_vad/build_turn_detector -- there is one
+    streaming implementation, so this is a config's worth of knobs rather than
+    a named preset. Kept separate from the `asr` presets in models.yaml on
+    purpose: those are batch, file-in/text-out stages that benchmark.py
+    compares against each other, while this consumes a live frame stream and
+    cannot be substituted for one. Conflating them would put an object in the
+    preset table that half the callers could not actually use.
+
+    Imported lazily so that merely importing registry does not construct a
+    sherpa-onnx online recognizer for the majority of callers who never enable
+    streaming ASR.
+    """
+    from .stage import asr_stream
+
+    config = _load_yaml(STREAMING_ASR_CONFIG_PATH)
+    config.update(overrides)
+    # model_dir is written relative to the project root in the yaml, the same
+    # convention _build() applies to preset params.
+    if "model_dir" in config:
+        config["model_dir"] = PROJECT_ROOT / config["model_dir"]
+    return asr_stream.StreamingTranscriber(**config)
 
 
 def build_turn_detector(**overrides) -> turn_detector.TurnDetector:

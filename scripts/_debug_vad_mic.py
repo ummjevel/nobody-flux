@@ -32,7 +32,7 @@ import soundfile as sf
 import yaml
 
 from src.nobody_flux.paths import PROJECT_ROOT
-from src.nobody_flux.vad import FRAME_SAMPLES, SAMPLE_RATE, VoiceActivityDetector
+from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE, VoiceActivityDetector
 
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 DURATION_S = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0

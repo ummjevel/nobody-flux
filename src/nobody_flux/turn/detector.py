@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .paths import PROJECT_ROOT
+from ..paths import PROJECT_ROOT
 
 SAMPLE_RATE = 16_000
 # Smart Turn v3's fixed input geometry (confirmed by introspecting the onnx:

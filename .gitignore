@@ -47,6 +47,10 @@ data/benchmark_wavs/
 data/*.db
 data/*.db-journal
 
+# Scratch output from the debug/calibration scripts (data/tmp/*.wav was NOT
+# covered by data/*.wav above -- that pattern only matches direct children).
+data/tmp/
+
 # OS / editor
 .DS_Store
 Thumbs.db

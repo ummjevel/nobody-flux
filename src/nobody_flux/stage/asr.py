@@ -11,70 +11,33 @@ Model: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
 
 from __future__ import annotations
 
-import glob
-import os
-import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+import sherpa_onnx
+import soundfile as sf
+
 from ._procio import LineReader, StderrDrainer, clean_subprocess_env
-from .paths import PROJECT_ROOT
+from ..paths import PROJECT_ROOT
 
-# sherpa-onnx's compiled extension links against onnxruntime's shared library,
-# but the pip onnxruntime wheel ships it under onnxruntime/capi/ with a name and
-# in a location that sherpa-onnx's linker search doesn't find on its own. The
-# fix differs by OS (both confirmed by hand):
+# Note on `import sherpa_onnx` above: its compiled extension links against
+# onnxruntime's shared library, which the pip wheel installs under a name and
+# in a location sherpa-onnx's own loader does not search. Making that import
+# work therefore requires a per-OS fixup (symlinks on Linux/macOS, DLL
+# directory registration on Windows).
 #
-#   Linux: the extension dlopen()s a bare "libonnxruntime.so", but the wheel only
-#   ships versioned "libonnxruntime.so.1.27.0". We symlink the bare name next to
-#   it, AND scripts/env.sh must put that dir on LD_LIBRARY_PATH before launch
-#   (glibc reads LD_LIBRARY_PATH once at startup, so os.environ here is too late).
+# That fixup used to live here, as a block of glob/symlink code wedged between
+# this module's imports. It now lives in nobody_flux.platform_support and runs
+# from the package __init__, which is guaranteed to execute before any
+# submodule -- so by the time this line is reached the environment is already
+# prepared, and the import needs no special ordering, no `# noqa: E402`, and no
+# knowledge of the platform matrix. See platform_support.link_native_libraries.
 #
-#   macOS: the extension references "@rpath/libonnxruntime.<ver>.dylib" (versioned)
-#   and searches its OWN dir (sherpa_onnx/lib/), NOT onnxruntime/capi/ where the
-#   real dylib lives. DYLD_LIBRARY_PATH is unreliable (SIP strips it), so we
-#   symlink the real versioned dylib INTO sherpa_onnx/lib/ where @rpath looks.
-_SITE_PKGS = str(PROJECT_ROOT / ".venv" / "lib" / "*" / "site-packages")
-
-if platform.system() == "Darwin":
-    # onnxruntime dylib can sit in capi/ or elsewhere under the package -- search
-    # the whole onnxruntime tree, then link each into every sherpa_onnx/lib dir.
-    _ort_dylibs = glob.glob(
-        os.path.join(_SITE_PKGS, "onnxruntime", "**", "libonnxruntime.*.dylib"), recursive=True
-    )
-    _sherpa_libdirs = glob.glob(os.path.join(_SITE_PKGS, "sherpa_onnx", "lib"))
-    for _src in _ort_dylibs:  # _src is absolute (PROJECT_ROOT is absolute)
-        for _libdir in _sherpa_libdirs:
-            _dst = os.path.join(_libdir, os.path.basename(_src))
-            if os.path.exists(_dst):
-                continue  # a working link/file is already there
-            # Not resolvable: either missing, or a leftover BROKEN symlink (e.g.
-            # one made by hand with a relative target). Clear a broken link so
-            # the fresh absolute symlink below can be created.
-            if os.path.islink(_dst):
-                try:
-                    os.remove(_dst)
-                except OSError:
-                    pass
-            try:
-                os.symlink(_src, _dst)  # absolute symlink to the real dylib
-            except OSError:
-                pass
-else:
-    for _versioned in glob.glob(
-        os.path.join(_SITE_PKGS, "onnxruntime", "capi", "libonnxruntime.so.*")
-    ):
-        _unversioned = os.path.join(os.path.dirname(_versioned), "libonnxruntime.so")
-        if not os.path.exists(_unversioned):
-            try:
-                os.symlink(os.path.basename(_versioned), _unversioned)
-            except OSError:
-                pass  # read-only site-packages, race, etc. -- import may still succeed
-
-import numpy as np  # noqa: E402
-import sherpa_onnx  # noqa: E402 -- Linux needs LD_LIBRARY_PATH set first (see above)
-import soundfile as sf  # noqa: E402
+# One part of the Linux fix cannot be done from Python at all: glibc reads
+# LD_LIBRARY_PATH once at process startup, so `source scripts/env.sh` is still
+# required there before launching. Windows and macOS need no shell step.
 
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "sense-voice"
 

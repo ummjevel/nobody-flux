@@ -13,20 +13,59 @@ from pathlib import Path
 from threading import Thread
 from typing import Iterator
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-
-from .paths import PROJECT_ROOT
-from .persona import SYSTEM_PROMPT
+from ..paths import PROJECT_ROOT
+from ..persona import SYSTEM_PROMPT
 
 DEFAULT_MODEL_ID = "Qwen/Qwen3-0.6B"
 
+# `transformers` is imported lazily too, for a plainer reason than torch: it is
+# genuinely slow to import. Measured cold on the Windows environment at ~42s,
+# and around a second even warm -- it eagerly walks a large module tree at
+# import. Since registry.py imports this file merely to look up a class, every
+# entry point (including scripts that never build an LLM at all) was paying
+# that. Both classes need it only inside __post_init__, so deferring it costs
+# nothing and removes the single largest fixed startup cost in the project.
+#
+# torch is deferred for a different and stronger reason: correctness of the
+# dependency graph. The default preset (qwen3-0.6b-gguf) runs through llama.cpp
+# and never touches torch, so an absent or broken torch -- a CPU-slim
+# environment, a CUDA build mismatched to the driver -- should disable the raw-
+# transformers presets, not fail the whole program at import. Deferring makes
+# the cost and the risk land on exactly the presets that asked for them, which
+# is what lets requirements/windows-cpu.txt treat torch as optional.
+#
+# The reason is the default preset: qwen3-0.6b-gguf runs through llama.cpp and
+# never touches torch. But registry.py imports this module to reach *both* LLM
+# classes, and pipeline.py imports it for a type annotation -- so a module-level
+# `import torch` made every entry point pay for it, and made a torch that was
+# absent or broken (a CPU-slim environment, a CUDA build mismatched to the
+# driver) fail the whole program at import rather than only the presets that
+# actually need it.
+#
+# Deferring it means the cost and the risk land on exactly the presets that
+# asked for them: build an LFM2 or raw-Qwen preset and torch loads; stay on the
+# GGUF default and it never does. That is worth roughly a second of startup on
+# the default path, and it is what lets requirements/windows-cpu.txt treat torch
+# as genuinely optional.
 
-def _default_device() -> str:
-    """cuda (Nvidia) > mps (Apple Silicon) > cpu. Picked once at import; a
-    preset can still override via the `device` field. mps lets the raw-
-    transformers presets use the GPU on a MacBook instead of falling all the
-    way back to cpu."""
+
+def _resolve_device(preference: str) -> str:
+    """Turn a device preference into a concrete torch device string.
+
+    ``"auto"`` prefers cuda (Nvidia) > mps (Apple Silicon) > cpu. Any other
+    value is passed through untouched, so a preset can pin ``"cpu"`` to get
+    CM4-realistic timings on a machine that has a GPU.
+
+    Resolved per instance, at construction, rather than once at import: import
+    time is the wrong moment to probe for a GPU (it charges every caller for a
+    CUDA context they may not want), and a module-level constant cannot see a
+    ``CUDA_VISIBLE_DEVICES`` set after import.
+    """
+    if preference != "auto":
+        return preference
+
+    import torch
+
     if torch.cuda.is_available():
         return "cuda"
     mps = getattr(torch.backends, "mps", None)
@@ -35,13 +74,12 @@ def _default_device() -> str:
     return "cpu"
 
 
-_DEFAULT_DEVICE = _default_device()
-
-
 @dataclass
 class NobodyLLM:
     model_id: str = DEFAULT_MODEL_ID
-    device: str = _DEFAULT_DEVICE
+    # "auto" resolves at construction -- see _resolve_device. configs/models.yaml
+    # may pin a concrete device instead.
+    device: str = "auto"
     max_new_tokens: int = 96
     # Each stored turn is re-sent to the model (no cross-call KV cache -- see
     # reply() below), so an unbounded history means both re-encoding cost and
@@ -58,10 +96,19 @@ class NobodyLLM:
     system_prompt_suffix: str = ""
 
     def __post_init__(self):
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.device = _resolve_device(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.model = (
             AutoModelForCausalLM.from_pretrained(
                 self.model_id,
+                # bfloat16 on CUDA halves weight memory and bandwidth at
+                # negligible quality cost for a 0.6B chat model. Not used on
+                # cpu/mps: CPU bfloat16 matmul falls back to slow paths on most
+                # x86, and mps support for it is uneven -- float32 is faster on
+                # both despite being larger.
                 dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
             )
             .to(self.device)
@@ -115,6 +162,9 @@ class NobodyLLM:
         cache) -- acceptable for this prototype's short exchanges (see
         max_history_turns), worth revisiting in the deferred on-device pass.
         """
+        import torch
+        from transformers import TextIteratorStreamer
+
         prompt = self._build_prompt(user_text)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
 
@@ -152,7 +202,6 @@ class NobodyLLM:
 
         self._remember(user_text, "".join(pieces).strip())
 
-    @torch.no_grad()
     def generate_raw(
         self, system_prompt: str, user_text: str, max_new_tokens: int | None = None
     ) -> str:
@@ -168,6 +217,8 @@ class NobodyLLM:
         extraction should be deterministic/repeatable, not varied turn to
         turn like a chat reply.
         """
+        import torch
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
@@ -177,12 +228,17 @@ class NobodyLLM:
         )
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
 
-        out_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens or self.max_new_tokens,
-            do_sample=False,
-            pad_token_id=self.tokenizer.eos_token_id,
-        )
+        # A context manager rather than the @torch.no_grad() decorator this
+        # used to carry: a decorator is evaluated when the class body runs,
+        # which would reintroduce the module-level torch import this file
+        # deliberately avoids.
+        with torch.no_grad():
+            out_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens or self.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
         new_ids = out_ids[0, inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
 
@@ -244,6 +300,7 @@ class NobodyLLMGguf:
 
     def __post_init__(self):
         from llama_cpp import Llama
+        from transformers import AutoTokenizer
 
         self._llm = Llama(
             model_path=str(self.model_path),
