@@ -55,8 +55,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -75,6 +78,18 @@ from src.nobody_flux.turn.controller import CapturedTurn, TurnController, TurnSt
 from src.nobody_flux.turn.vad import VadEvent
 
 SESSION_AUDIO_DIR = PROJECT_ROOT / "data" / "sessions"
+
+# Longest the main thread ever blocks in one call. Every wait in this script is
+# chunked to this so Ctrl+C is acted on promptly -- see ConversationSession.run
+# for why an unbounded wait swallows it entirely on Windows. Short enough to
+# feel immediate, long enough that idling costs nothing measurable.
+WAIT_SLICE_S = 0.2
+
+# Ceiling on waiting for a reply to finish sounding. Not a real limit -- this
+# persona's replies run seconds, a confirmed barge-in ends playback immediately,
+# and both players already abandon a wedged device on their own. It is here so
+# that a bug somewhere below cannot strand the loop with the microphone open.
+PLAYBACK_WAIT_CAP_S = 120.0
 
 # Spoken once at session start, after the models finish loading. Audible
 # confirmation that the session is ready and listening -- without it the first
@@ -146,8 +161,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_turn_controller(args, audio_session) -> TurnController:
+def build_turn_controller(args, audio_session) -> tuple[TurnController, Callable[[], None]]:
     """Assemble the controller from flags and config.
+
+    Returns it together with a teardown callable for whatever devices this
+    function opened -- nothing if the duplex session supplied the frames, the
+    private input stream's close if it did not. The caller owns shutdown order,
+    so it has to be handed the thing to shut down.
 
     Each optional component is built only when its flag asks for it: the turn
     detector loads an ONNX model plus a Whisper feature extractor, and the
@@ -164,10 +184,12 @@ def build_turn_controller(args, audio_session) -> TurnController:
 
     # With a duplex session the frames are already echo-cancelled and come from
     # the same stream that plays the reply; without one, capture gets its own
-    # input stream.
-    frame_source = (
-        audio_session.read_frame if audio_session is not None else _mic_frame_source()
-    )
+    # input stream. Only the latter is ours to close -- the session is closed by
+    # whoever started it.
+    if audio_session is not None:
+        frame_source, close_capture = audio_session.read_frame, lambda: None
+    else:
+        frame_source, close_capture = _mic_frame_source()
 
     def player_factory():
         # SessionPlayer routes playback through the duplex stream, which is what
@@ -185,7 +207,7 @@ def build_turn_controller(args, audio_session) -> TurnController:
         elif event is VadEvent.BARGE_IN_CONFIRMED and state is TurnState.RESPONDING:
             logger.info("[VAD] barge-in confirmed, stopping reply")
 
-    return TurnController(
+    controller = TurnController(
         vad=registry.build_vad(),
         frame_source=frame_source,
         player_factory=player_factory,
@@ -194,6 +216,21 @@ def build_turn_controller(args, audio_session) -> TurnController:
         allow_barge_in=not args.no_barge_in,
         on_event=on_event,
     )
+    return controller, close_capture
+
+
+def wait_for_playback(player, limit_s: float) -> None:
+    """Block until the player finishes, but in slices, so Ctrl+C still works.
+
+    ``player.join()`` with no timeout has the same problem as an unbounded
+    ``queue.get()`` on Windows -- see ConversationSession.run. The bound is
+    belt-and-braces: the players already time out a wedged device internally,
+    so reaching it means something is wrong, and continuing is better than
+    hanging the session on the greeting.
+    """
+    deadline = time.monotonic() + limit_s
+    while player.is_active() and time.monotonic() < deadline:
+        player.join(timeout=WAIT_SLICE_S)
 
 
 def _mic_frame_source():
@@ -201,10 +238,15 @@ def _mic_frame_source():
 
     The duplex AudioSession is the better arrangement and supplies frames
     itself; this exists for `--aec none`, where capture and playback stay on
-    separate streams. The stream is opened here and never closed -- the process
-    is about to run for the whole session and exits immediately afterwards, so
-    tying its lifetime to the interpreter's is both correct and simpler than
-    threading a close through the controller's shutdown path.
+    separate streams.
+
+    Returns ``(read, close)``. An earlier version returned only the reader and
+    never closed the stream, on the reasoning that the process was about to exit
+    anyway. That reasoning was wrong in a way that mattered: at shutdown the
+    capture thread is parked inside PortAudio's blocking read, and tearing
+    PortAudio down with a thread inside a live stream is exactly the shape of
+    teardown that hangs. Closing it explicitly, before the interpreter starts
+    unwinding, keeps exit under our control.
 
     Wrapped in skip_warmup for the same reason the duplex session is: opening
     an input stream emits a transient that the VAD reads as speech, and without
@@ -226,7 +268,18 @@ def _mic_frame_source():
         # this frame is retained past the current iteration.
         return block[:, 0].copy()
 
-    return skip_warmup(read)
+    def close() -> None:
+        # abort(), not stop(): stop() drains, and there is nothing worth
+        # draining from a capture stream we are done with. Errors are ignored --
+        # this runs on the way out, and a device that is already gone is not a
+        # problem to report.
+        try:
+            stream.abort()
+            stream.close()
+        except Exception:
+            pass
+
+    return skip_warmup(read), close
 
 
 class ConversationSession:
@@ -281,7 +334,7 @@ class ConversationSession:
         try:
             player.enqueue(samples, sample_rate)
             player.done()
-            player.join()
+            wait_for_playback(player, limit_s=len(samples) / sample_rate + 5.0)
         finally:
             self.controller.finish_response()
 
@@ -289,7 +342,17 @@ class ConversationSession:
 
     def run(self) -> None:
         while True:
-            turn = self.controller.next_turn()
+            # Waited for in short slices rather than indefinitely, so that
+            # Ctrl+C works.
+            #
+            # A bare next_turn() blocks in queue.get() with no timeout, and on
+            # Windows that is not interruptible: CPython can only run a signal
+            # handler in the main thread between bytecodes, and an unbounded
+            # lock wait never gets there -- so Ctrl+C sets its flag and nothing
+            # happens until the user next speaks. (POSIX hides this, since the
+            # underlying wait returns EINTR.) Returning every WAIT_SLICE_S
+            # gives the interpreter a point at which to raise KeyboardInterrupt.
+            turn = self.controller.next_turn(timeout=WAIT_SLICE_S)
             if turn is None or turn.utterance.audio.size == 0:
                 continue
             logger.info(
@@ -299,6 +362,17 @@ class ConversationSession:
             player = self.controller.begin_response()
             try:
                 self.handle_turn(turn, player)
+                # Stay in RESPONDING until the audio has actually finished, not
+                # merely until the last chunk was handed to the player.
+                #
+                # handle_turn returns as soon as everything is enqueued, which
+                # for a multi-sentence reply is seconds before it stops
+                # sounding. Leaving RESPONDING at that point means speech during
+                # the tail is classified as the user taking their turn rather
+                # than interrupting -- so the reply is not cut, and the new turn
+                # is captured on top of it. Both talk at once, which is the
+                # exact failure barge-in exists to prevent.
+                wait_for_playback(player, limit_s=PLAYBACK_WAIT_CAP_S)
             finally:
                 self.controller.finish_response()
 
@@ -404,7 +478,11 @@ class ConversationSession:
         would otherwise burn a generation call on an empty transcript.
 
         Failures are logged and swallowed on purpose: memory is an enhancement,
-        and losing it should not take the rest of shutdown down with it.
+        and losing it should not take the rest of shutdown down with it. A
+        second Ctrl+C is treated the same way -- the user asking to quit again,
+        during the one part of shutdown that is slow, means they want out now,
+        not that they want the DB and the audio device left unreleased. Skipping
+        this costs at most one session's memories.
         """
         if self.turns_handled == 0:
             return
@@ -437,6 +515,8 @@ class ConversationSession:
                 else:
                     skipped += 1
             logger.info(f"[memory] added {added}, updated {updated}, skipped {skipped}")
+        except KeyboardInterrupt:
+            logger.info("[memory] 건너뜀 (Ctrl+C)")
         except Exception:
             logger.exception("[memory] extraction failed, skipping")
 
@@ -458,7 +538,7 @@ def main() -> None:
         audio_session.start()
         logger.info(f"[audio] duplex AEC session active (--aec {args.aec})")
 
-    controller = build_turn_controller(args, audio_session)
+    controller, close_capture = build_turn_controller(args, audio_session)
     session = ConversationSession(pipeline, presets, controller)
     session.recall_previous_sessions()
 
@@ -468,11 +548,22 @@ def main() -> None:
         session.greet()
         session.run()
     except KeyboardInterrupt:
-        pass
+        # Acknowledged immediately, because shutdown is not instant: memory
+        # extraction below runs a generation pass, which takes seconds. Without
+        # a line here that gap is indistinguishable from Ctrl+C having been
+        # ignored, and the natural response is to press it again.
+        logger.info("Ctrl+C -- 정리 중 (기억 추출까지 몇 초 걸려. 다시 누르면 건너뜀)")
     finally:
         # Stop capture first: it is the only thread that can still queue work,
         # and letting it run while the pipeline is torn down would race.
         controller.stop()
+        # Then release the device itself. controller.stop() only asks the
+        # capture thread to finish and gives up on it after a moment -- it
+        # cannot interrupt a blocking device read, so that thread is very
+        # likely still sitting inside one right now. Closing the stream is what
+        # actually ends it, and doing so here rather than leaving it to
+        # interpreter shutdown is what keeps exit from hanging in PortAudio.
+        close_capture()
         if controller.barge_in_count:
             logger.info(f"[turn] {controller.barge_in_count} barge-in(s) this session")
         session.extract_memories_from_session()
@@ -486,3 +577,18 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Exit without waiting for interpreter teardown.
+    #
+    # Everything above this line has been released explicitly and the session is
+    # over, so there is nothing left that a normal exit would do for us. What it
+    # can still do is hang: the native libraries this process loads (PortAudio,
+    # onnxruntime, llama.cpp) each run their own threads and atexit teardown,
+    # and a daemon capture thread may still be parked inside one of them. Ctrl+C
+    # meaning "the process is gone" matters more here than a tidy unwind of
+    # state that is already saved.
+    #
+    # Flush first -- os._exit does not, and the last log lines are the ones that
+    # say the session closed cleanly.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
