@@ -317,7 +317,7 @@ class SherpaMatchaTts:
     release, 1.12.19 through 1.13.2) -- no official Korean one. The
     sherpa-matcha-ko preset (configs/models.yaml) points at a
     community/custom-trained Korean acoustic model instead (see
-    models/shepa-matcha-ko/, `maintainer: freyatts-ko` in its own ONNX
+    models/sherpa-matcha-ko/, `maintainer: freyatts-ko` in its own ONNX
     metadata -- the same lineage as this project's freyatts-ko-voicea TTS
     preset). That checkpoint ships as *just* the acoustic model, no
     tokens.txt/vocoder/espeak-ng-data of its own -- confirmed via its ONNX

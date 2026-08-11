@@ -28,7 +28,7 @@ models/**/*.safetensors
 # including their non-weight auxiliary files (tokens.txt, README.md,
 # espeak-ng-data/), same "not committed" rule as the weights above.
 models/sherpa-matcha-en/
-models/shepa-matcha-ko/
+models/sherpa-matcha-ko/
 
 # Streaming Zipformer Korean ASR checkpoint (encoder/decoder/joiner onnx +
 # tokens.txt/bpe.model/test_wavs) -- whole directory fetched by

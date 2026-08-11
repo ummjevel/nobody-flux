@@ -87,7 +87,7 @@ cat <<'NOTE'
 Default pipeline = sense-voice-small (ASR) + qwen3-0.6b-gguf (LLM) + sherpa-matcha-ko (TTS).
 
 Before running talk.py, note:
-- The Korean default TTS (sherpa-matcha-ko) needs models/shepa-matcha-ko/ (a custom
+- The Korean default TTS (sherpa-matcha-ko) needs models/sherpa-matcha-ko/ (a custom
   checkpoint, NOT downloadable here -- copy it in by hand, same as on Linux). To test the
   pipeline end-to-end WITHOUT it, use `--tts sherpa-matcha-en` (English, fetched above).
 - GPU-only presets (freyatts-ko-voicea, moss-tts-nano) are NOT set up -- they need CUDA.

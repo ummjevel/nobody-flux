@@ -148,7 +148,7 @@ tts:
     params: {}  # every field already defaults to the English checkpoint
 
   # DEFAULT. Same runtime as sherpa-matcha-en above, but with a
-  # community/custom-trained Korean acoustic model (models/shepa-matcha-ko/,
+  # community/custom-trained Korean acoustic model (models/sherpa-matcha-ko/,
   # not from k2-fsa) swapped in -- see SherpaMatchaTts's docstring for why it
   # can reuse the English preset's vocoder/tokens/data_dir despite living in
   # a different directory. CPU-only (see the class's `provider` field);
@@ -158,12 +158,12 @@ tts:
   sherpa-matcha-ko:
     class: SherpaMatchaTts
     params:
-      acoustic_model: models/shepa-matcha-ko/matcha-ko-voiceA-ep499-steps10.onnx
+      acoustic_model: models/sherpa-matcha-ko/matcha-ko-voiceA-ep499-steps10.onnx
       # Model-specific tokens.txt + vocoder now live alongside the acoustic
       # model itself (not reused from sherpa-matcha-en/ anymore) -- only
       # data_dir (espeak-ng-data) is still shared, since that's a
       # multi-language phoneme dictionary package, not something that needs
       # to be per-model.
-      vocoder: models/shepa-matcha-ko/vocos-22khz-univ.onnx
-      tokens: models/shepa-matcha-ko/tokens.txt
+      vocoder: models/sherpa-matcha-ko/vocos-22khz-univ.onnx
+      tokens: models/sherpa-matcha-ko/tokens.txt
       data_dir: models/sherpa-matcha-en/espeak-ng-data

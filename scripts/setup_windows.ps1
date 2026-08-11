@@ -237,11 +237,11 @@ Get-File -Label 'vocos-22khz-univ.onnx vocoder (~51MB)' `
     -Url 'https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-22khz-univ.onnx' `
     -Path (Join-Path $ProjectRoot 'models\sherpa-matcha-en\vocos-22khz-univ.onnx')
 
-$koreanAcoustic = Join-Path $ProjectRoot 'models\shepa-matcha-ko\matcha-ko-voiceA-ep499-steps10.onnx'
+$koreanAcoustic = Join-Path $ProjectRoot 'models\sherpa-matcha-ko\matcha-ko-voiceA-ep499-steps10.onnx'
 if (-not (Test-Path $koreanAcoustic)) {
     Write-Host ""
     Write-Warning @"
-The DEFAULT TTS preset (sherpa-matcha-ko) needs models\shepa-matcha-ko\, which
+The DEFAULT TTS preset (sherpa-matcha-ko) needs models\sherpa-matcha-ko\, which
 is a custom-trained Korean checkpoint with no public download -- the bash setup
 scripts cannot fetch it either. Copy the directory in by hand (acoustic model,
 vocoder and tokens.txt) from a machine that has it.
