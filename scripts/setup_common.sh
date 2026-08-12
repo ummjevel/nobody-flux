@@ -229,10 +229,25 @@ else
     echo "Already present at $TEN_VAD_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 9/11: Qwen3-0.6B GGUF (second LLM candidate) =="
+echo "== [$TARGET_LABEL] 9/11: LLM weights (GGUF) =="
+# Mi:dm 2.0 Mini is the DEFAULT preset (configs/models.yaml), chosen by
+# measuring conversational behaviour rather than benchmark scores -- see
+# docs/llm-conversational-selection.md. MIT licensed, Korean-first, built for
+# on-device use. Qwen3-0.6B stays alongside it as the fast fallback and as the
+# comparison point scripts/_ab_persona.py measures against.
+MIDM_DIR="$PROJECT_ROOT/models/midm-2.3b-gguf"
+if [ ! -f "$MIDM_DIR/Midm-2.0-Mini-Instruct-Q4_K_M.gguf" ]; then
+    echo "Downloading Midm-2.0-Mini-Instruct-Q4_K_M.gguf (~1.3GB, default LLM)..."
+    mkdir -p "$MIDM_DIR"
+    curl -L -o "$MIDM_DIR/Midm-2.0-Mini-Instruct-Q4_K_M.gguf" \
+        "https://huggingface.co/mykor/Midm-2.0-Mini-Instruct-gguf/resolve/main/Midm-2.0-Mini-Instruct-Q4_K_M.gguf"
+else
+    echo "Already present at $MIDM_DIR, skipping."
+fi
+
 GGUF_DIR="$PROJECT_ROOT/models/qwen3-0.6b-gguf"
 if [ ! -f "$GGUF_DIR/Qwen3-0.6B-Q4_K_M.gguf" ]; then
-    echo "Downloading Qwen3-0.6B-Q4_K_M.gguf (~460MB, community requant by bartowski)..."
+    echo "Downloading Qwen3-0.6B-Q4_K_M.gguf (~460MB, fast fallback)..."
     mkdir -p "$GGUF_DIR"
     curl -L -o "$GGUF_DIR/Qwen3-0.6B-Q4_K_M.gguf" \
         "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q4_K_M.gguf"

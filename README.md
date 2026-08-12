@@ -128,8 +128,12 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
 | 스테이지 | 기본값 | 다른 프리셋 |
 |---|---|---|
 | ASR | `sense-voice-small` | `streaming-zipformer-ko`, `vibeasr-bitnet` |
-| LLM | `qwen3-0.6b-gguf` | `qwen3-0.6b`, `lfm2-350m/700m/1.2b` |
+| LLM | `midm-2.3b-gguf` | `qwen3-1.7b-gguf`, `qwen3-0.6b-gguf`, `kanana-2.1b-gguf`\*, `exaone-2.4b-gguf`\* |
 | TTS | `sherpa-matcha-ko` | `sherpa-matcha-en`, `freyatts-ko-voicea`, `moss-tts-nano` |
+
+\* 비상업 라이선스 — 성능 참고용. LLM 선정 근거와 라이선스 분석은
+[`docs/llm-conversational-selection.md`](docs/llm-conversational-selection.md),
+모델 비교는 `scripts/_ab_persona.py`(페르소나 준수 + 대화 지속성 + 레이턴시).
 
 프리셋은 `configs/models.yaml`, 목소리는 `configs/voices.yaml`(목소리는 별도 축이 아니라 TTS
 스테이지의 파라미터라 따로 관리). 새 모델을 붙이는 절차는 `docs/FEATURES.md`의

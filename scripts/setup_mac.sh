@@ -57,10 +57,16 @@ fetch_file "$PROJECT_ROOT/models/ten-vad/ten-vad.onnx" \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx" \
     "ten-vad.onnx (~330KB)"
 
-echo "== [mac] 4/6: Qwen3-0.6B GGUF (default LLM) =="
+echo "== [mac] 4/6: LLM weights (GGUF) =="
+# Default preset, picked by measuring conversational behaviour rather than
+# benchmark scores -- see docs/llm-conversational-selection.md.
+fetch_file "$PROJECT_ROOT/models/midm-2.3b-gguf/Midm-2.0-Mini-Instruct-Q4_K_M.gguf" \
+    "https://huggingface.co/mykor/Midm-2.0-Mini-Instruct-gguf/resolve/main/Midm-2.0-Mini-Instruct-Q4_K_M.gguf" \
+    "Mi:dm-2.0-Mini Q4_K_M (~1.3GB, default LLM)"
+# Fast fallback, and what _ab_persona.py compares the default against.
 fetch_file "$PROJECT_ROOT/models/qwen3-0.6b-gguf/Qwen3-0.6B-Q4_K_M.gguf" \
     "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q4_K_M.gguf" \
-    "Qwen3-0.6B-Q4_K_M.gguf (~460MB)"
+    "Qwen3-0.6B-Q4_K_M.gguf (~460MB, fast fallback)"
 
 echo "== [mac] 5/6: Smart Turn v3 (optional endpoint) + Matcha-EN espeak-ng-data =="
 fetch_file "$PROJECT_ROOT/models/smart-turn-v3/smart-turn-v3.2-cpu.onnx" \
@@ -84,7 +90,7 @@ cat <<'NOTE'
 
 == [mac] setup complete ==
 
-Default pipeline = sense-voice-small (ASR) + qwen3-0.6b-gguf (LLM) + sherpa-matcha-ko (TTS).
+Default pipeline = sense-voice-small (ASR) + midm-2.3b-gguf (LLM) + sherpa-matcha-ko (TTS).
 
 Before running talk.py, note:
 - The Korean default TTS (sherpa-matcha-ko) needs models/sherpa-matcha-ko/ (a custom

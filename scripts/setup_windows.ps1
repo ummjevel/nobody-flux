@@ -220,8 +220,15 @@ Get-File -Label 'smart-turn-v3.2-cpu.onnx (~8.7MB)' `
     -Url 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx' `
     -Path (Join-Path $ProjectRoot 'models\smart-turn-v3\smart-turn-v3.2-cpu.onnx')
 
-Write-Step 7 $total "Qwen3-0.6B GGUF (default llm preset)"
-Get-File -Label 'Qwen3-0.6B-Q4_K_M.gguf (~460MB)' `
+Write-Step 7 $total "LLM weights"
+# The default preset. Chosen by measuring conversational behaviour rather than
+# benchmark scores -- see docs/llm-conversational-selection.md.
+Get-File -Label 'Mi:dm-2.0-Mini Q4_K_M (~1.3GB, default LLM)' `
+    -Url 'https://huggingface.co/mykor/Midm-2.0-Mini-Instruct-gguf/resolve/main/Midm-2.0-Mini-Instruct-Q4_K_M.gguf' `
+    -Path (Join-Path $ProjectRoot 'models\midm-2.3b-gguf\Midm-2.0-Mini-Instruct-Q4_K_M.gguf')
+# Kept as well: it is the fast fallback if the 2.3B turns out too slow on the
+# target hardware, and _ab_persona.py compares against it.
+Get-File -Label 'Qwen3-0.6B-Q4_K_M.gguf (~460MB, fast fallback)' `
     -Url 'https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q4_K_M.gguf' `
     -Path (Join-Path $ProjectRoot 'models\qwen3-0.6b-gguf\Qwen3-0.6B-Q4_K_M.gguf')
 
