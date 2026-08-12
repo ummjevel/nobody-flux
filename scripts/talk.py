@@ -351,6 +351,14 @@ class ConversationSession:
         try:
             player.enqueue(samples, sample_rate)
             player.done()
+            # Spend the greeting's playback prefilling the LLM's static prompt
+            # prefix, which otherwise lands on the user's first question -- 6.7s
+            # against 0.7s warm, on the default preset. The greeting is about
+            # two seconds of dead time and this is exactly what it is worth
+            # using for. Not every backend has it, hence the getattr.
+            warm_up = getattr(self.pipeline.llm, "warm_up", None)
+            if warm_up is not None:
+                warm_up()
             wait_for_playback(player, limit_s=len(samples) / sample_rate + 5.0)
         finally:
             self.controller.finish_response()

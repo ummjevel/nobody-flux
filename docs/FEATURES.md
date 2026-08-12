@@ -19,7 +19,7 @@ tts`로 줄고, 이후 문장 합성이 앞 문장 재생과 겹친다. 실측(�
 | 스테이지 | 현재 기본값 | 구현 |
 |---|---|---|
 | ASR | `sense-voice-small` | `src/nobody_flux/stage/asr.py` |
-| LLM | `qwen3-0.6b-gguf` | `src/nobody_flux/stage/llm.py` (페르소나 `persona.py` — "퀜", 20~30대 또래 반말) |
+| LLM | `midm-2.3b-gguf` | `src/nobody_flux/stage/llm.py` (페르소나 `persona.py` — "퀜", 20~30대 또래 반말) |
 | TTS | `sherpa-matcha-ko` | `src/nobody_flux/stage/tts.py` (ONNX·CPU, CM4 타깃에 맞아 기본값으로 선택) |
 
 ### 소스 레이아웃
@@ -45,8 +45,17 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
   정확하나 어절 스페이스 없음)와 **라이브 스트리밍**(Phase 3, `stage/asr_stream.py` —
   프리셋이 아니라 `configs/streaming_asr.yaml`, 아래 참고).
 
-**LLM**
-- `qwen3-0.6b-gguf` (기본) — Qwen3-0.6B GGUF Q4_K_M, llama-cpp-python. raw transformers 대비 CPU ~2배.
+**LLM** — 전부 llama.cpp GGUF Q4_K_M(=CM4와 같은 CPU 경로). 선정 근거와 라이선스 분석은
+[`llm-conversational-selection.md`](llm-conversational-selection.md), 비교 도구는
+`scripts/_ab_persona.py`.
+- `midm-2.3b-gguf` (**기본**, 2026-08 교체) — KT Mi:dm 2.0 Mini. **MIT**, 한국어 특화,
+  온디바이스 목적으로 pruning+distillation. 실측 위반 0/18·판박이 0%·턴 0.73s로 전 후보 중 최상.
+  **주의**: 자체 시스템 프롬프트를 ~1000토큰 삽입하며 그 안에 "경어체 사용" 지시가 있다(우리
+  프롬프트가 뒤에 붙어 이긴다). 첫 턴 프리필 6.7초는 `warm_up()`이 인사말 뒤로 숨긴다.
+- `qwen3-1.7b-gguf` — Apache-2.0. 위반 1/18, 되묻기 89%(최고). 라이선스가 자유로운 대안.
+- `kanana-2.1b-gguf` / `exaone-2.4b-gguf` — 한국어 특화지만 **둘 다 비상업 라이선스**라 참고용.
+  EXAONE은 가장 큰데도 가장 나빴다(99자 장황, 이모지 5회).
+- `qwen3-0.6b-gguf` (구 기본) — 빠르지만(0.35s) 위반 5/18, 되묻기 33%. 앵무새·이모지·붕괴가 잦다.
 - `qwen3-0.6b` — 같은 weights, raw transformers.
 - `lfm2-350m`/`lfm2-700m`/`lfm2-1.2b` — LiquidAI LFM2(엣지 특화). **벤치 결과: 이 페르소나(짧은 반말)엔
   드롭인 개선 아님** — 350m 마크다운 남발, 700m 반말 톤 좋으나 장황·느림(~2.7s vs qwen-gguf ~1.25s).

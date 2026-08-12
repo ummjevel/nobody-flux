@@ -11,7 +11,12 @@
 #
 defaults:
   asr: sense-voice-small
-  llm: qwen3-0.6b-gguf
+  # Changed from qwen3-0.6b-gguf 2026-08 after measuring persona adherence and
+  # conversational behaviour together (scripts/_ab_persona.py). The 0.6B broke a
+  # rule in 5 of 18 replies and handed the turn back only a third of the time;
+  # Mi:dm broke none, was never repetitive, and is FASTER per turn than the
+  # 1.7B alternative. See docs/llm-conversational-selection.md.
+  llm: midm-2.3b-gguf
   tts: sherpa-matcha-ko
 
 asr:
@@ -78,13 +83,20 @@ llm:
       tokenizer_id: Qwen/Qwen3-1.7B
 
   # Kakao Kanana Nano 2.1B, Korean-first pretraining rather than Korean as one
-  # language among many -- which is the actual weakness being addressed here.
-  # Llama-3 style template, so the turn boundary is <|eot_id|>, not ChatML's.
-  # Apache-2.0.
+  # language among many. Llama-3 style template, so the turn boundary is
+  # <|eot_id|>, not ChatML's.
+  #
+  # LICENSE: CC-BY-NC-4.0 -- NON-COMMERCIAL. (An earlier version of this comment
+  # said Apache-2.0, which was wrong; the license was read from the model card
+  # afterwards. Do not take a license from a quantizer's repo or from memory --
+  # several of the Korean models here are custom or non-commercial, and the
+  # quantized repos frequently omit or restate the terms incorrectly.)
+  # Reference point for what a Korean-tuned model this size can do, not a
+  # deployment candidate.
   kanana-2.1b-gguf:
     class: NobodyLLMGguf
     params:
-      model_path: models/kanana-2.1b-gguf/kanana-nano-2.1b-instruct-q4_k_m.gguf
+      model_path: models/kanana-2.1b-gguf/kakaocorp.kanana-nano-2.1b-instruct.Q4_K_M.gguf
       tokenizer_id: kakaocorp/kanana-nano-2.1b-instruct
       stop: ["<|eot_id|>"]
       template_kwargs: {}
@@ -102,11 +114,40 @@ llm:
       stop: ["[|endofturn|]"]
       template_kwargs: {}
 
+  # KT Mi:dm 2.0 Mini, 2.3B. The most interesting candidate on paper and the
+  # only Korean-first one that is actually shippable:
+  #   - MIT licensed, so commercial use is unrestricted (Kanana is NC, EXAONE
+  #     is NC, HyperCLOVAX is custom+gated -- see below)
+  #   - built FOR on-device use: pruned and distilled down from the Base model
+  #     rather than being a small model that happens to exist
+  #   - "Korea-centric" is their claim about socio-cultural grounding, not just
+  #     Korean text throughput, which is closer to what a companion needs than
+  #     a higher KMMLU score is
+  #
+  # Its chat template is Llama-3 style (<|eot_id|>), and it PREPENDS about a
+  # thousand tokens of KT's own system prompt before ours -- including
+  # instructions that contradict this project's persona directly:
+  #   "너는 Mi:dm으로서..."                    (we want 퀜)
+  #   "기본적으로 경어체를 사용해야 한다"        (we want 반말)
+  #   "인공지능으로서 ... 의인화하지 않아야 한다" (we want a friend, not a tool)
+  # persona.SYSTEM_PROMPT lands at the end of that block and wins in practice --
+  # it scored 0/18 violations, better than anything else here. But that is a
+  # last-instruction-wins effect, not agreement, so treat a sudden outbreak of
+  # 존댓말 as this reasserting itself rather than as a regression in our prompt.
+  midm-2.3b-gguf:
+    class: NobodyLLMGguf
+    params:
+      model_path: models/midm-2.3b-gguf/Midm-2.0-Mini-Instruct-Q4_K_M.gguf
+      tokenizer_id: K-intelligence/Midm-2.0-Mini-Instruct
+      stop: ["<|eot_id|>"]
+      template_kwargs: {}
+
   # Naver HyperCLOVAX-SEED 1.5B was the other Korean-first candidate and is NOT
   # here: the tokenizer repo is gated (HTTP 401), and this project renders
   # prompts with the model's own chat template via transformers, so a GGUF
-  # without an accessible tokenizer cannot be driven. Revisit if access is
-  # granted, or by reading the template embedded in the GGUF itself.
+  # without an accessible tokenizer cannot be driven. Its license is custom
+  # ("hyperclovax-seed") rather than an SPDX one, so it would need reading
+  # before use even with access.
 
   # Second candidate, added for comparison -- see docs/output/
   # ondevice_asr_llm_tts_research_20260716.md's LLM section update.

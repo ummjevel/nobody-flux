@@ -356,9 +356,10 @@ class NobodyLLMGguf:
         mysteriously ignoring the model's turn markers.
         """
         try:
-            return self.tokenizer.apply_chat_template(
+            rendered = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True, **self.template_kwargs
             )
+            return self._strip_duplicate_bos(rendered)
         except (TypeError, ValueError):
             # A template that rejects one of the extra kwargs, or one with no
             # system role (Gemma raises ValueError for that). enable_thinking is
@@ -367,9 +368,26 @@ class NobodyLLMGguf:
             # every non-Qwen preset remember to clear the field.
             if not self.template_kwargs:
                 raise
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+            return self._strip_duplicate_bos(
+                self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
             )
+
+    def _strip_duplicate_bos(self, prompt: str) -> str:
+        """Remove a leading BOS token that llama.cpp is about to add again.
+
+        Llama-3 style templates (Mi:dm, Kanana) emit <|begin_of_text|> as part
+        of the rendered string, and create_completion() tokenizes with add_bos
+        on top of that. llama.cpp notices and warns that the duplicate "will
+        likely reduce response quality" -- the model sees a sequence that never
+        occurred in training. ChatML templates do not emit one, so this is a
+        no-op for the Qwen presets.
+        """
+        bos = getattr(self.tokenizer, "bos_token", None)
+        if bos and prompt.startswith(bos):
+            return prompt[len(bos):]
+        return prompt
 
     def _remember(self, user_text: str, reply_text: str) -> None:
         self.history.append({"role": "user", "content": user_text})
@@ -377,6 +395,35 @@ class NobodyLLMGguf:
         max_messages = self.max_history_turns * 2
         if len(self.history) > max_messages:
             self.history = self.history[-max_messages:]
+
+    def warm_up(self) -> None:
+        """Prefill the static part of the prompt so the first real turn is not
+        the one that pays for it.
+
+        Every turn re-sends the same prefix -- the persona, the few-shot
+        examples, and for some models a large built-in system prompt of their
+        own (Mi:dm prepends about a thousand tokens). llama.cpp caches that
+        prefix's KV across calls, so from the second turn on it costs nothing;
+        the first turn pays for all of it at once. Measured on Mi:dm: 6.7s cold
+        against 0.7s warm.
+
+        The fix is not to shrink the prompt but to move the cost somewhere the
+        user is not waiting. scripts/talk.py calls this while the greeting is
+        being synthesized and played, which is dead time of roughly the right
+        size.
+
+        Generates a single token rather than zero: llama.cpp populates the
+        cache as part of evaluating a request, so asking for no output would
+        not prime anything. Failures are swallowed -- this is an optimization,
+        and a session that starts slowly is better than one that does not
+        start.
+        """
+        try:
+            self._llm.create_completion(
+                self._build_prompt("안녕"), max_tokens=1, temperature=0.0, stop=self.stop
+            )
+        except Exception:
+            pass
 
     def reply(self, user_text: str) -> str:
         return "".join(self.reply_stream(user_text))

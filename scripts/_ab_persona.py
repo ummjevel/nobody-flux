@@ -11,15 +11,39 @@ numbers written as Hangul -- and the 0.6B default broke three of them in a
 single live session. Checking them mechanically turns "the replies feel off"
 into a number that can be compared across models and across prompt changes.
 
+Rule compliance is necessary and not sufficient. This is a companion, not an
+assistant: the thing that decides whether it is worth building is whether
+someone wants to talk to it *again*, and a model can break no rules while being
+dull enough that nobody does. The companion-chatbot literature finds enjoyment,
+not task success, is the leading reason people keep using one -- so alongside
+the rule checks there are three cheap mechanical proxies for whether a reply
+keeps a conversation alive.
+
 What it measures, per preset:
 
   위반         how many replies broke at least one rule, out of runs x inputs.
                Sampling is stochastic, so each input runs several times and the
                failures are counted rather than judged from one sample.
+  되묻기       fraction of replies that hand the turn back -- a question, an
+               invitation to continue. A companion that only answers makes the
+               user do all the work of keeping the conversation going.
+  판박이       distinct replies as a fraction of all replies. The live session
+               that started this work had one model emit the same sentence
+               four turns running; a model that says the same thing regardless
+               of input is finished as a conversational partner even if every
+               sentence is individually fine.
+  길이         median reply length in characters. Both directions are failures
+               here: one-word replies are work to talk to, and a paragraph is
+               worse, because every character is spoken aloud and the user
+               cannot skim it.
   ttfb / total first-token and full-reply latency. Persona adherence is
                worthless if the model is too slow to hold a conversation, and
                these two trade against each other directly as models get
                bigger. Measured on CPU, because CPU is what the CM4 target has.
+
+None of these say a model is *good company* -- that needs a person talking to
+it. They say when it is definitely not, which is what a cheap automated pass
+should do.
 
 The inputs are the turns that actually failed in a live session, plus a couple
 that exercise rules those did not reach. This is a regression set, not a
@@ -62,6 +86,19 @@ DIGITS = re.compile(r"[0-9]")
 LATIN = re.compile(r"[A-Za-z]{2,}")
 
 
+def hands_turn_back(reply: str) -> bool:
+    """Does this reply give the user something to answer?
+
+    A question mark, or one of the endings Korean uses to ask without one
+    ("...어?" written flat, "...지", "...나"). Crude on purpose -- it is a rate
+    compared across models, not a judgement of any single reply.
+    """
+    if "?" in reply:
+        return True
+    tail = reply.rstrip().rstrip(".!~ ")
+    return tail.endswith(("어", "야", "지", "나", "까", "니", "래"))
+
+
 def violations(user_text: str, reply: str) -> list[str]:
     """Which persona rules this reply broke. Empty list means clean."""
     found = []
@@ -90,6 +127,8 @@ def evaluate(preset: str, runs: int, verbose: bool) -> dict:
     ttfb: list[float] = []
     totals: list[float] = []
     by_rule: dict[str, int] = {}
+    replies: list[str] = []
+    invites = 0
 
     for text in INPUTS:
         for _ in range(runs):
@@ -106,6 +145,8 @@ def evaluate(preset: str, runs: int, verbose: bool) -> dict:
 
             ttfb.append(first if first is not None else elapsed)
             totals.append(elapsed)
+            replies.append(reply)
+            invites += bool(hands_turn_back(reply))
             problems = violations(text, reply)
             for rule in problems:
                 by_rule[rule] = by_rule.get(rule, 0) + 1
@@ -124,6 +165,11 @@ def evaluate(preset: str, runs: int, verbose: bool) -> dict:
         "violations": bad,
         "total": total,
         "by_rule": by_rule,
+        "invite_rate": invites / max(total, 1),
+        # Distinct replies over all replies. Low means the model is not really
+        # responding to what was said.
+        "distinct_rate": len({r for r in replies if r}) / max(len(replies), 1),
+        "median_len": int(median([float(len(r)) for r in replies])),
         "ttfb_s": median(ttfb),
         "total_s": median(totals),
         "load_s": load_s,
@@ -159,7 +205,8 @@ def main() -> int:
         results.append(result)
         rules = ", ".join(f"{k} {v}" for k, v in sorted(result["by_rule"].items())) or "-"
         print(
-            f"  위반 {result['violations']}/{result['total']}   ttfb {result['ttfb_s']:.2f}s   "
+            f"  위반 {result['violations']}/{result['total']}   되묻기 {result['invite_rate']:.0%}   "
+            f"판박이 {result['distinct_rate']:.0%} distinct   {result['median_len']}자   "
             f"turn {result['total_s']:.2f}s   ({rules})"
         )
 
@@ -167,15 +214,21 @@ def main() -> int:
         print("\nNo preset could be evaluated.")
         return 1
 
-    print(f"\n{'preset':<24}{'위반':>10}{'ttfb':>9}{'turn':>9}  주요 위반")
-    print("-" * 78)
+    print(
+        f"\n{'preset':<22}{'위반':>9}{'되묻기':>8}{'판박이':>8}{'길이':>7}{'turn':>8}  주요 위반"
+    )
+    print("-" * 88)
     for r in sorted(results, key=lambda r: (r["violations"] / max(r["total"], 1), r["total_s"])):
         rules = ", ".join(f"{k} {v}" for k, v in sorted(r["by_rule"].items(), key=lambda kv: -kv[1]))
         print(
-            f"{r['preset']:<24}{r['violations']:>4}/{r['total']:<5}{r['ttfb_s']:>8.2f}s"
-            f"{r['total_s']:>8.2f}s  {rules[:34]}"
+            f"{r['preset']:<22}{r['violations']:>3}/{r['total']:<5}"
+            f"{r['invite_rate']:>7.0%}{r['distinct_rate']:>8.0%}{r['median_len']:>6}자"
+            f"{r['total_s']:>7.2f}s  {rules[:28]}"
         )
-    print("\nCPU 기준 (CM4 타깃과 같은 조건). 위반이 같으면 빠른 쪽이 낫다.")
+    print(
+        "\nCPU 기준 (CM4 타깃과 같은 조건). 위반이 적고 되묻기가 높고 판박이가 100%에 가까울수록 좋다."
+        "\n길이는 낮을수록 좋은 게 아니라 30~60자 근처가 적당하다 -- 전부 음성으로 나가기 때문."
+    )
     return 0
 
 
