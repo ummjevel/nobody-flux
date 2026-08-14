@@ -7,9 +7,15 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 
 리서치 배경은 [`docs/output/ondevice_asr_llm_tts_research_20260716.md`](docs/output/ondevice_asr_llm_tts_research_20260716.md),
 지금 구현된 기능/범위와 **무엇이 실측이고 무엇이 추정치인지**는
-[`docs/FEATURES.md`](docs/FEATURES.md), 기억(개인화) 설계는
+[`docs/FEATURES.md`](docs/FEATURES.md), LLM 선정 근거·라이선스는
+[`docs/llm-conversational-selection.md`](docs/llm-conversational-selection.md), 기억(개인화) 설계는
 [`docs/memory-design.md`](docs/memory-design.md), 끼어들기 설계는
 [`docs/barge-in-design.md`](docs/barge-in-design.md) 참고.
+
+> ⚠️ **턴테이킹 경로는 아직 사람이 검증하지 않았다.** 자동 테스트 146개는 코드 정확성만
+> 보증한다. 남은 사람 검증 항목(대화 루프, 맞장구 판정, AEC 스피커 실험)은
+> [`docs/FEATURES.md`의 "사람이 직접 해야 할 검증"](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료)에
+> 체크리스트로 정리돼 있다.
 
 ## 아키텍처
 
@@ -27,8 +33,9 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
   │  stage/  │ ──────▶ │  stage/  │ ───────────▶ │  stage/  │──┘
   │   asr    │         │   llm    │              │   tts    │
   └──────────┘         └──────────┘              └──────────┘
-   SenseVoice           Qwen3-0.6B                Matcha-TTS
-   (또는 stage/asr_stream: 말하는 동안 실시간 인식)
+   SenseVoice          Mi:dm 2.0 Mini             Matcha-TTS (ko)
+   (int8)                 (2.3B, Q4)
+   (또는 stage/asr_stream: 말하는 동안 실시간 인식 — 아래 "알려진 제약" 참고)
 ```
 
 핵심 두 가지:
@@ -36,7 +43,8 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 - **캡처가 멈추지 않는다.** 응답을 생성하는 동안에도 마이크를 계속 읽으므로, 생성 중 끼어들기가
   *관측된다*. 예전엔 그 구간 내내 아무도 마이크를 읽지 않아서 끼어들기가 유실됐다.
 - **응답이 문장 단위로 흐른다.** LLM 토큰을 문장으로 잘라 나오는 대로 TTS→재생하므로 첫 음성까지가
-  `ASR + 첫 문장 LLM + 첫 문장 TTS`로 줄어든다.
+  `ASR + 첫 문장 LLM + 첫 문장 TTS`로 줄어든다. 합성은 워커 스레드에서 돌아 **다음 문장의 토큰
+  생성과 겹친다** — 예전엔 합성하는 동안 디코딩이 멈춰서 총 응답시간이 `Σllm + Σtts`였다.
 
 각 스테이지가 뭘 쓰는지는 코드가 아니라 `configs/models.yaml`이 결정한다 (아래 "모델 스왑" 참고).
 모든 대화는 `data/conversations.db` (SQLite)에 기록된다.
@@ -95,7 +103,7 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav   # 1회
 
 | 플래그 | 하는 일 |
 |---|---|
-| `--streaming-asr` | 프레임이 도착하는 대로 인식(Phase 3). 말이 끝나면 인식도 끝나 있다. |
+| `--streaming-asr` | 프레임이 도착하는 대로 인식(Phase 3). 말이 끝나면 인식도 끝나 있다 — **단 현재 체크포인트가 실사용 발화를 못 읽어 배치로 폴백한다**(아래 "알려진 제약"). |
 | `--aec auto\|refgate\|speex\|os\|vpio` | 캡처+재생을 **하나의** duplex 스트림으로. 에코 제거 + macOS err-50 회피. |
 | `--endpoint-detect` | Smart Turn v3로 "문장 중간 멈춤"과 "말 끝남"을 구분해 자연스러운 멈춤이 잘리는 걸 완화. |
 | `--no-barge-in` | 끼어들기로 응답을 취소하지 않음(캡처는 계속 → 발화는 유실되지 않음). |
@@ -145,6 +153,32 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
 sqlite3 data/conversations.db "SELECT turn_index, user_text, reply_text, asr_ms, llm_ms, tts_ms FROM turns ORDER BY id DESC LIMIT 10;"
 ```
 
+### 6. 테스트
+
+```bash
+uv run pytest                      # 146개, 3초 미만
+```
+
+```powershell
+.venv-win\Scripts\python.exe -m pytest
+```
+
+**모델 가중치도 오디오 장치도 필요 없다** — 순수 로직(턴 컨트롤러 상태기계, VAD 링버퍼,
+문장 청커, 기억 파싱/consolidation, storage 쿼리, 스레드 예산)만 대상이기 때문이다.
+이 제약이 핵심이다: 가중치가 필요한 스위트는 결국 아무도 안 돌린다.
+
+무엇을 보증하고 무엇을 **보증하지 않는지** 헷갈리면 안 된다 — 이건 "코드가 명세대로 동작한다"
+까지다. 대화가 자연스러운지, 끼어들기가 즉각적인지는 여기서 안 나온다
+([`docs/FEATURES.md`의 사람 검증 체크리스트](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료)).
+
+모델·장치가 필요한 검증은 별도 스모크 스크립트다:
+
+```bash
+uv run python scripts/_smoke_imports.py   # 의존성만 (CI 가능)
+uv run python scripts/_smoke_turn.py      # 모델 가중치 필요
+uv run python scripts/_smoke_duplex.py    # 실제 스피커+마이크 필요
+```
+
 ## 프로젝트 구조
 
 ```
@@ -161,22 +195,35 @@ src/nobody_flux/
     session.py               # duplex 스트림 (캡처+재생 한 소유자)
     aec.py player.py resample.py
   pipeline.py     # 스테이지 오케스트레이션 + 스테이지별 계측 (run / run_streaming)
-  registry.py     # configs/*.yaml → 객체
+  registry.py     # configs/*.yaml → 객체 (+ 스테이지별 CPU 스레드 예산 배분)
   persona.py memory.py storage.py textchunk.py platform_support.py
 scripts/
   talk.py                    # 연속 음성 루프
   run_pipeline.py            # 1회성 wav-in/wav-out
   benchmark.py               # 프리셋 조합별 latency 표
-  _smoke_imports.py _smoke_turn.py _smoke_duplex.py     # 검증
+  _ab_persona.py             # LLM 프리셋 비교: 페르소나 준수 + 대화 지속성 + 멀티턴
+  _smoke_imports.py _smoke_turn.py _smoke_duplex.py     # 가중치/장치가 필요한 검증
   _calibrate_vad_threshold.py _calibrate_aec_delay.py _calibrate_turn_params.py
   _debug_vad_mic.py _debug_segment.py _debug_silence.py _debug_roomtone.py
   setup_{local,server,mac,common}.sh  setup_windows.ps1  env.sh
-configs/          # models, voices, vad, audio, turn_detector, streaming_asr
-docs/             # 리서치, 기능 정의, 기억/barge-in/TTS 설계
+tests/            # pytest 146개 — 가중치·오디오 장치 불필요, 3초 미만
+configs/          # models, voices, vad, audio, turn_detector, streaming_asr,
+                  # runtime(CPU 예산), persona_scenarios(멀티턴 평가)
+docs/             # 리서치, 기능 정의, LLM 선정, 코드리뷰, 기억/barge-in/TTS 설계
 ```
 
 ## 알려진 제약
 
+- **`--streaming-asr`은 지금 실사용 발화에서 켜지지 않는다.** `streaming-zipformer-ko`는 깨끗한
+  테스트 wav에선 완벽한데(배치와 유사도 1.00) 실제 마이크 발화에선 빈 문자열을 낸다. 같은
+  체크포인트의 배치 경로도 동일하고, SenseVoice는 같은 오디오를 정상 인식한다. 레벨·잡음·리드인·
+  길이는 전부 배제했고 화자/마이크 특성만 남았다 — **배선이 아니라 모델이 안 맞는 것**. 파이프라인이
+  배치 ASR로 폴백하므로 대화는 계속되지만, 플래그를 켜도 실제 인식은 SenseVoice가 한다.
+  자세한 실측은 `docs/FEATURES.md`.
+- **CM4 격차는 설정으로 못 줄인다.** 스레드를 4코어로 묶어도(`NOBODY_CPU_BUDGET=4`) 1.1~1.3배밖에
+  안 느려진다 = 이 크기 모델은 4코어에서 스레드 부족이 아니고 병목은 코어당 성능(ISA·클럭·메모리
+  대역폭)이다. `configs/runtime.yaml`의 예산은 스래싱 방지용이지 CM4를 살리는 카드가 아니며,
+  실기가 느리면 답은 더 작은 모델이나 distillation이다. **CM4 실기 측정은 보드가 없어 보류 중.**
 - **VAD 임계값은 기기 의존적이다.** 위 "마이크 캘리브레이션" 참고. 복사해 오면 안 되는 값이다.
 - **디지털 무음(`np.zeros`)은 TEN-VAD 입력으로 쓰면 안 된다.** 특징 추출이 퇴화해 모델이 무음
   구간 내내 발화라고 답한다(측정 확인). 패딩은 실제 노이즈로.
@@ -184,7 +231,9 @@ docs/             # 리서치, 기능 정의, 기억/barge-in/TTS 설계
   (`.venv-win`)나 macOS를 쓰거나, `run_pipeline.py`로 사전 녹음 wav를 써서 로직만 검증할 것.
 - **AEC는 아직 실제로 시험되지 않았다.** 듀플렉스 경로와 "자기 자신에게 끼어들지 않는지"는
   실기에서 확인됐지만(`_smoke_duplex.py`), 현재 측정 셋업이 헤드폰이라 취소할 에코가 거의 없다.
-  스피커+한 통 구성(=CM4)에서 다시 확인 필요.
+  스피커+한 통 구성(=CM4)에서 다시 확인 필요. 참조 신호 정렬이 프레임 → **샘플 단위**로 바뀐 뒤
+  (2026-08-14) 아직 아무도 시험하지 않았다 — 그 전에는 `corr_threshold`가 원리적으로 튜닝
+  불가능했으므로 예전 결과는 참고가 안 된다.
 - **MOSS-TTS-Nano는 별도 venv**: `torch==2.7.0`을 정확히 요구해서 이 프로젝트 venv에 같이 깔면
   `uv sync`가 둘 중 하나를 깨뜨린다(실제로 한 번 발생 — `uv sync`가 수동 설치된 moss-tts-nano를
   조용히 삭제). `external/MOSS-TTS-Nano/.venv`를 따로 두고 서브프로세스로 호출한다. 그 venv엔
