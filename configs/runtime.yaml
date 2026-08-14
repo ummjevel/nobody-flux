@@ -1,0 +1,34 @@
+# CPU 스레드 예산 (docs/code-review-20260814.md #9).
+#
+# 이전에는 스테이지별 스레드 수가 코드 기본값에 흩어져 있었고, 합치면 4코어
+# CM4에 ~14스레드를 요구했다 (llm 8 + batch asr 8 + 보조 2×3). 그 값들은 전부
+# "28코어 개발 박스" 기준 튜닝이라 CM4에선 스래싱한다. 여기의 예산이
+# registry.py를 통해 각 스테이지의 스레드 수를 기계에 맞게 결정한다 --
+# models.yaml 프리셋이 n_threads/num_threads를 명시하면 그쪽이 이긴다
+# (명시적 설정 > 파생 기본값).
+#
+# cpu_budget: null 이면 os.cpu_count(). CM4 실측 전까지는 고정하지 말 것 --
+# 실측하면서 좁히는 게 이 파일의 존재 이유다.
+cpu_budget: null
+
+# 스테이지별 배분: threads = clamp(1, budget * fraction, cap).
+#
+# fraction의 근거: batch ASR은 LLM이 시작되기 전 임계경로를 혼자 쓰므로 크게;
+# LLM과 TTS는 스트리밍 중 겹치므로(합성 워커, code-review #2) 합이 예산을
+# 넘지 않게 나눈다. cap은 28코어 개발 박스에서 기존에 손으로 튜닝했던 값
+# (llm 8, tts 2, asr 8)을 상한으로 보존한다 -- 그 이상은 측정상 이득이 없었다
+# (stage/asr.py의 num_threads 주석: 8->16이 오히려 느려짐).
+#
+# 4코어 CM4가 받는 값: llm 3, tts 1, asr 3.
+# 여기 없는 소비자(vad/turn_detector/streaming_asr)는 각자의 yaml에서 1~2로
+# 이미 작다.
+stages:
+  llm:
+    fraction: 0.75
+    cap: 8
+  tts:
+    fraction: 0.25
+    cap: 2
+  asr:
+    fraction: 0.75
+    cap: 8

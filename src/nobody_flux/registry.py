@@ -13,6 +13,7 @@ module doesn't add new models, just the plumbing for future ones.
 
 from __future__ import annotations
 
+import os
 import typing
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 TURN_DETECTOR_CONFIG_PATH = PROJECT_ROOT / "configs" / "turn_detector.yaml"
 AUDIO_CONFIG_PATH = PROJECT_ROOT / "configs" / "audio.yaml"
 STREAMING_ASR_CONFIG_PATH = PROJECT_ROOT / "configs" / "streaming_asr.yaml"
+RUNTIME_CONFIG_PATH = PROJECT_ROOT / "configs" / "runtime.yaml"
 
 # Every class a preset's `class:` field is allowed to name. Deliberately a
 # fixed allowlist (not getattr-by-string on the modules) so a typo'd or
@@ -47,9 +49,62 @@ _CLASSES: dict[str, type] = {
 }
 
 
+# (mtime, parsed) per path. models.yaml alone was being parsed six times per
+# startup (three _build calls + three _cli.py default lookups); besides the
+# waste, uncached reads meant three stages could in principle see three
+# different file contents if the yaml were edited mid-startup. The mtime key
+# keeps long-lived callers (REPL, calibration scripts) able to pick up edits.
+_YAML_CACHE: dict[Path, tuple[float, dict[str, Any]]] = {}
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
+    mtime = os.path.getmtime(path)
+    cached = _YAML_CACHE.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        data = yaml.safe_load(f)
+    _YAML_CACHE[path] = (mtime, data)
+    return data
+
+
+def stage_threads(stage: str) -> int | None:
+    """Thread count for a stage under configs/runtime.yaml's CPU budget, or
+    None when the budget doesn't cover that stage.
+
+    threads = clamp(1, cpu_budget * fraction, cap). This is what replaces the
+    per-class hardcoded defaults that were tuned on a 28-core dev box and
+    added up to ~14 threads on the 4-core CM4 target (code-review #9). A
+    preset that sets n_threads explicitly in models.yaml still wins -- see
+    _build; this is the *derived default*, not an override.
+    """
+    if not RUNTIME_CONFIG_PATH.exists():
+        return None
+    config = _load_yaml(RUNTIME_CONFIG_PATH) or {}
+    entry = (config.get("stages") or {}).get(stage)
+    if entry is None:
+        return None
+    budget = config.get("cpu_budget") or os.cpu_count() or 4
+    threads = max(1, int(budget * float(entry.get("fraction", 1.0))))
+    cap = entry.get("cap")
+    if cap is not None:
+        threads = min(threads, int(cap))
+    return threads
+
+
+def _inject_thread_budget(stage: str, cls: type, params: dict[str, Any]) -> None:
+    """Fill in the class's thread-count parameter from the runtime budget,
+    unless the preset/override already pinned one (explicit config beats a
+    derived default). Field name differs per runtime (llama.cpp: n_threads,
+    sherpa/onnxruntime: num_threads), so it's discovered from the class's own
+    annotations rather than assumed."""
+    hints = typing.get_type_hints(cls)
+    field_name = next((n for n in ("n_threads", "num_threads") if n in hints), None)
+    if field_name is None or field_name in params:
+        return
+    threads = stage_threads(stage)
+    if threads is not None:
+        params[field_name] = threads
 
 
 def _lookup(mapping: dict[str, Any], key: str, label: str) -> Any:
@@ -95,6 +150,7 @@ def _build(stage: str, preset: str | None, overrides: dict[str, Any] | None = No
     for key in _path_field_names(cls) & params.keys():
         params[key] = PROJECT_ROOT / params[key]
 
+    _inject_thread_budget(stage, cls, params)
     return cls(**params)
 
 
@@ -174,8 +230,11 @@ def build_audio_session(backend: str | None = None) -> audio_session.AudioSessio
     config = _load_yaml(AUDIO_CONFIG_PATH)
     prefer = backend or config.get("backend", "auto")
     resolved = audio_session.select_backend(prefer)
+    delay_ms = config.get("delay_ms")
     return audio_session.build_session(
-        resolved, delay_frames=int(config.get("delay_frames", 4))
+        resolved,
+        delay_frames=int(config.get("delay_frames", 4)),
+        delay_ms=float(delay_ms) if delay_ms is not None else None,
     )
 
 
