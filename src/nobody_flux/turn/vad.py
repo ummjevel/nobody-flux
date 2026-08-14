@@ -70,10 +70,28 @@ class Utterance:
 
     audio: np.ndarray  # mono float32 at `sample_rate`
     sample_rate: int = SAMPLE_RATE
+    # Samples the VAD attributed to speech itself, excluding the pre-roll
+    # padding prepended to `audio` (and, for a multi-segment turn, counting
+    # only the segments). None when the capture path did not measure it.
+    speech_samples: int | None = None
 
     @property
     def duration_s(self) -> float:
+        """Length of the full capture buffer, pre-roll included."""
         return len(self.audio) / self.sample_rate
+
+    @property
+    def speech_duration_s(self) -> float:
+        """Length of the speech itself, as the VAD segmented it.
+
+        This is the value duration-based judgments must use. ``duration_s``
+        includes ``pre_roll_ms`` of padding, so with pre_roll_ms=500 every
+        capture reports at least ~0.65s -- which silently disabled the 0.6s
+        backchannel gate when pre-roll grew from 300 to 500 (afc0df8).
+        """
+        if self.speech_samples is None:
+            return self.duration_s
+        return self.speech_samples / self.sample_rate
 
 
 class VadEvent(Enum):
@@ -130,9 +148,18 @@ class _AudioRing:
         n = len(frame)
         if n >= self._capacity:
             # A single frame larger than the whole ring: keep only its tail,
-            # which is all the ring could have held anyway.
-            self._buffer[:] = frame[-self._capacity :]
+            # which is all the ring could have held anyway. The tail must be
+            # written where the ring's invariant puts it -- absolute position p
+            # lives at p % capacity -- not flat at index 0, or read() would
+            # return size-correct but phase-shuffled audio with no error.
+            # (Unreachable with today's 30ms frames vs a ~20.5s ring, but this
+            # class exists to prevent silent audio corruption; see read().)
+            tail = frame[-self._capacity :]
             self._written += n
+            start = self._written % self._capacity
+            split = self._capacity - start
+            self._buffer[start:] = tail[:split]
+            self._buffer[:start] = tail[split:]
             return
         start = self._written % self._capacity
         end = start + n
@@ -383,6 +410,10 @@ class VadStream:
         self._barge_in_fired = False  # one barge-in per turn, not per segment
         self._grace_frames = max(1, int(config.endpoint_grace_ms / FRAME_MS))
         self._pending: Utterance | None = None
+        # Speech samples accumulated across this turn's finalized segments --
+        # what Utterance.speech_duration_s reports. Pre-roll is excluded by
+        # construction: sherpa's segment length never includes it.
+        self._turn_speech_samples = 0
 
     def _reset_segment(self) -> None:
         """Clear the state that belongs to a single VAD segment."""
@@ -404,6 +435,7 @@ class VadStream:
         self._barge_in_fired = False
         self._grace_frames = max(1, int(self._config.endpoint_grace_ms / FRAME_MS))
         self._pending = None
+        self._turn_speech_samples = 0
 
     @property
     def speaking(self) -> bool:
@@ -443,7 +475,11 @@ class VadStream:
         if self._carried is not None and not self._speaking:
             self._silence_frames += 1
             if self._silence_frames >= self._grace_frames:
-                self._pending = Utterance(audio=self._carried, sample_rate=SAMPLE_RATE)
+                self._pending = Utterance(
+                    audio=self._carried,
+                    sample_rate=SAMPLE_RATE,
+                    speech_samples=self._turn_speech_samples,
+                )
                 yield VadEvent.UTTERANCE_READY
                 return
 
@@ -472,6 +508,7 @@ class VadStream:
         segment_length = len(segment.samples)
         self._vad.pop()
 
+        self._turn_speech_samples += segment_length
         seg_audio = self._ring.read(
             segment_start - self._pre_roll_samples, segment_start + segment_length
         )
@@ -480,13 +517,21 @@ class VadStream:
         )
 
         if self._turn_detector is None:
-            self._pending = Utterance(audio=combined, sample_rate=SAMPLE_RATE)
+            self._pending = Utterance(
+                audio=combined,
+                sample_rate=SAMPLE_RATE,
+                speech_samples=self._turn_speech_samples,
+            )
             yield VadEvent.UTTERANCE_READY
             return
 
         is_complete, prob = self._turn_detector.predict(combined, SAMPLE_RATE)
         if is_complete or len(combined) >= self._max_samples:
-            self._pending = Utterance(audio=combined, sample_rate=SAMPLE_RATE)
+            self._pending = Utterance(
+                audio=combined,
+                sample_rate=SAMPLE_RATE,
+                speech_samples=self._turn_speech_samples,
+            )
             yield VadEvent.UTTERANCE_READY
             return
 

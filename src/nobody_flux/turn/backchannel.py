@@ -36,8 +36,9 @@ BACKCHANNEL_MAX_DURATION_S = 0.6
 def _normalize(text: str) -> str:
     """Strips whitespace and trailing punctuation ASR might emit ("어.",
     "응!", "어 ") so BACKCHANNEL_WORDS can stay a plain set of bare words
-    instead of a pile of punctuation variants."""
-    return text.strip().strip(".!?~,")
+    instead of a pile of punctuation variants. Includes the CJK fullwidth
+    forms ("。！？") -- Korean models emit both widths (see textchunk.PRIMARY)."""
+    return text.strip().strip(".!?~,。！？、…")
 
 
 def is_empty_transcript(text: str) -> bool:

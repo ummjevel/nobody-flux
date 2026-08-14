@@ -84,6 +84,17 @@ class TurnState(Enum):
     RESPONDING = "responding"
 
 
+class CaptureFailed(RuntimeError):
+    """The capture thread died and no further turns can ever arrive.
+
+    Raised from ``next_turn`` (on the main thread) rather than logged from the
+    capture thread, because the failure mode it replaces was the worst kind:
+    the capture loop returned silently, the main loop kept polling an empty
+    queue forever, and a session with a dead microphone was indistinguishable
+    from a user who simply stopped talking.
+    """
+
+
 @dataclass
 class CapturedTurn:
     """One complete user turn, handed from the capture thread to the main one."""
@@ -99,7 +110,18 @@ class CapturedTurn:
 
     @property
     def duration_s(self) -> float:
+        """Full capture-buffer length, pre-roll included."""
         return self.utterance.duration_s
+
+    @property
+    def speech_duration_s(self) -> float:
+        """VAD-measured speech length, excluding pre-roll padding.
+
+        Use this for anything that judges "how long did the user speak" --
+        the backchannel gate above all. ``duration_s`` is inflated by
+        ``pre_roll_ms`` and exists for buffer-sized concerns.
+        """
+        return self.utterance.speech_duration_s
 
 
 @dataclass
@@ -157,6 +179,10 @@ class TurnController:
     _turns: queue.Queue = field(init=False, default_factory=queue.Queue)
     _cancel: threading.Event = field(init=False, default_factory=threading.Event)
     _shutdown: threading.Event = field(init=False, default_factory=threading.Event)
+    # Set by the capture thread when it dies with an exception; read by
+    # next_turn on the main thread, which turns it into a CaptureFailed raise.
+    _capture_failed: threading.Event = field(init=False, default_factory=threading.Event)
+    _capture_error: BaseException | None = field(init=False, default=None)
     _thread: threading.Thread | None = field(init=False, default=None)
     _turn_index: int = field(init=False, default=0)
     _barge_in_count: int = field(init=False, default=0)
@@ -224,6 +250,11 @@ class TurnController:
 
     # -- main-thread API ---------------------------------------------------
 
+    @property
+    def capture_failed(self) -> bool:
+        """True once the capture thread has died. See ``CaptureFailed``."""
+        return self._capture_failed.is_set()
+
     def next_turn(self, timeout: float | None = None) -> CapturedTurn | None:
         """Block until a complete user turn is available, or ``timeout``.
 
@@ -231,10 +262,20 @@ class TurnController:
         captured while a reply was still playing is delivered on the next call
         instead of being lost to the race between "reply ended" and "user
         started".
+
+        Raises ``CaptureFailed`` once the capture thread has died AND the queue
+        is drained -- turns captured before the failure are still delivered
+        first, then the caller learns the session cannot continue. Without the
+        raise, a dead microphone left the main loop polling an empty queue
+        forever while the session looked merely idle.
         """
         try:
             return self._turns.get(timeout=timeout)
         except queue.Empty:
+            if self._capture_failed.is_set():
+                raise CaptureFailed(
+                    "capture thread died; the microphone/VAD path is no longer running"
+                ) from self._capture_error
             return None
 
     def begin_response(self):
@@ -272,29 +313,38 @@ class TurnController:
         It must stay cheap: every microsecond spent here is a microsecond the
         next frame waits, and frames arriving late shift every duration this
         class measures.
+
+        Any exception -- a device read failing, the transcriber rejecting a
+        frame, the VAD runtime throwing -- ends capture, and *must not* end it
+        silently: the previous version bare-returned on frame_source errors and
+        let everything else kill the thread with nothing but an unhandled
+        traceback on stderr, leaving the main loop polling forever. The error
+        is stored and surfaced through next_turn as CaptureFailed instead.
         """
-        stream = self.vad.open_stream(turn_detector=self.turn_detector)
-        if self.transcriber is not None:
-            self.transcriber.reset()
-
-        while not self._shutdown.is_set():
-            try:
-                frame = self.frame_source()
-            except Exception:
-                # A device that has gone away should end capture, not spin on a
-                # failing read. The session teardown path reports it; retrying
-                # here would produce an unkillable hot loop.
-                return
-
+        try:
+            stream = self.vad.open_stream(turn_detector=self.turn_detector)
             if self.transcriber is not None:
-                # Fed unconditionally, not only while the VAD reports speech.
-                # A streaming transducer needs the silence around an utterance
-                # to establish context and to run its own endpoint rules --
-                # gating it on the VAD would degrade both.
-                self.transcriber.accept_frame(frame)
+                self.transcriber.reset()
 
-            for event in stream.push(frame):
-                self._handle_event(event, stream)
+            while not self._shutdown.is_set():
+                frame = self.frame_source()
+
+                if self.transcriber is not None:
+                    # Fed unconditionally, not only while the VAD reports speech.
+                    # A streaming transducer needs the silence around an utterance
+                    # to establish context and to run its own endpoint rules --
+                    # gating it on the VAD would degrade both.
+                    self.transcriber.accept_frame(frame)
+
+                for event in stream.push(frame):
+                    self._handle_event(event, stream)
+        except Exception as exc:
+            if self._shutdown.is_set():
+                # A device torn down by stop() may fail its in-flight read;
+                # that is shutdown working, not the microphone dying.
+                return
+            self._capture_error = exc
+            self._capture_failed.set()
 
     def _handle_event(self, event: VadEvent, stream) -> None:
         if self.on_event is not None:
