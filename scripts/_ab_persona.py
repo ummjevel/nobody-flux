@@ -45,14 +45,32 @@ None of these say a model is *good company* -- that needs a person talking to
 it. They say when it is definitely not, which is what a cheap automated pass
 should do.
 
-The inputs are the turns that actually failed in a live session, plus a couple
-that exercise rules those did not reach. This is a regression set, not a
-benchmark suite: it is small, it is specific, and every entry is there because
-something went wrong on it.
+The single-shot inputs are the turns that actually failed in a live session,
+plus a couple that exercise rules those did not reach. This is a regression
+set, not a benchmark suite: it is small, it is specific, and every entry is
+there because something went wrong on it.
+
+Multi-turn scenarios (configs/persona_scenarios.yaml) extend that with the
+failures single shots cannot see -- persona drift across turns, context
+amnesia ("내 이름 뭐라고 했지?"), and mechanical repetition of the same
+follow-up every turn. Three session-level measures come from them:
+
+  문맥         scripted memory probes: a fact is planted in an early turn and a
+               later turn asks it back (expect_any in the yaml). Pass = any
+               accepted substring appears in the reply.
+  반복         consecutive replies within a session that are near-duplicates
+               (character-bigram Jaccard > 0.5). The single-shot 판박이 rate
+               resets history every input, so it cannot see a model that greets
+               every scenario turn with the same "그래? 어땠어?".
+  후반위반     rule violations in turn 3+ of a session -- drift made visible.
+               A model that is clean for two turns and slides into 존댓말
+               afterwards passes every single-shot check.
 
     .venv-win\\Scripts\\python.exe scripts\\_ab_persona.py
     .venv-win\\Scripts\\python.exe scripts\\_ab_persona.py --presets qwen3-0.6b-gguf exaone-2.4b-gguf
     .venv-win\\Scripts\\python.exe scripts\\_ab_persona.py --runs 5 --verbose
+    .venv-win\\Scripts\\python.exe scripts\\_ab_persona.py --scenario-runs 3
+    .venv-win\\Scripts\\python.exe scripts\\_ab_persona.py --no-scenarios   # old behavior
 """
 
 from __future__ import annotations
@@ -63,9 +81,13 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.nobody_flux import registry
+
+SCENARIOS_PATH = Path(__file__).resolve().parents[1] / "configs" / "persona_scenarios.yaml"
 
 # Every one of these came from a real failure, except the last two which cover
 # rules the failing turns happened not to reach.
@@ -118,7 +140,84 @@ def violations(user_text: str, reply: str) -> list[str]:
     return found
 
 
-def evaluate(preset: str, runs: int, verbose: bool) -> dict:
+def load_scenarios() -> list[dict]:
+    with open(SCENARIOS_PATH, encoding="utf-8") as f:
+        return yaml.safe_load(f)["scenarios"]
+
+
+def near_duplicate(a: str, b: str) -> bool:
+    """Character-bigram Jaccard similarity above 0.5.
+
+    Whitespace and punctuation are stripped first, because the failure mode
+    this catches is "그래? 어땠어?" vs "그래! 어땠어?" -- the same reply with
+    cosmetic variation, which exact-match 판박이 counts as distinct. In a short
+    reply the punctuation bigrams alone drag Jaccard to the threshold, so they
+    must not count.
+    """
+    def bigrams(text: str) -> set[str]:
+        squeezed = re.sub(r"[\W_]+", "", text)
+        return {squeezed[i : i + 2] for i in range(len(squeezed) - 1)}
+
+    grams_a, grams_b = bigrams(a), bigrams(b)
+    if not grams_a or not grams_b:
+        return bool(a.strip()) and a.strip() == b.strip()
+    return len(grams_a & grams_b) / len(grams_a | grams_b) > 0.5
+
+
+def run_scenarios(model, scenarios: list[dict], runs: int, verbose: bool) -> dict:
+    """Play each scenario's scripted user turns into one model session and
+    score the three things single shots cannot see (see module docstring:
+    문맥, 반복, 후반위반)."""
+    ctx_pass = ctx_total = 0
+    dup_pairs = pair_total = 0
+    late_bad = late_total = 0
+
+    for scenario in scenarios:
+        for _ in range(runs):
+            model.reset()
+            prev_reply = None
+            for i, turn in enumerate(scenario["turns"]):
+                text = turn["user"]
+                reply = model.reply(text).strip()
+                problems = violations(text, reply)
+
+                flags = list(problems)
+                expected = turn.get("expect_any")
+                if expected:
+                    ctx_total += 1
+                    if any(sub in reply for sub in expected):
+                        ctx_pass += 1
+                    else:
+                        flags.append("문맥망각")
+                if prev_reply is not None:
+                    pair_total += 1
+                    if near_duplicate(prev_reply, reply):
+                        dup_pairs += 1
+                        flags.append("반복")
+                if i >= 2:  # turn 3+ -- late enough that drift has had time
+                    late_total += 1
+                    late_bad += bool(problems)
+
+                if verbose:
+                    flag = ",".join(flags) if flags else "ok"
+                    print(f"    [{scenario['name']} t{i + 1} {flag:<12}] {text}  ->  {reply[:60]}")
+                prev_reply = reply
+
+    return {
+        "ctx_pass": ctx_pass,
+        "ctx_total": ctx_total,
+        # Fraction of consecutive reply pairs that are near-duplicates. Lower
+        # is better -- unlike the single-shot distinct rate, which resets
+        # history per input and so can miss exactly this.
+        "repeat_rate": dup_pairs / max(pair_total, 1),
+        "late_bad": late_bad,
+        "late_total": late_total,
+    }
+
+
+def evaluate(
+    preset: str, runs: int, verbose: bool, scenarios: list[dict] | None, scenario_runs: int
+) -> dict:
     started = time.perf_counter()
     model = registry.build_llm(preset)
     load_s = time.perf_counter() - started
@@ -160,7 +259,10 @@ def evaluate(preset: str, runs: int, verbose: bool) -> dict:
         ordered = sorted(values)
         return ordered[len(ordered) // 2] if ordered else 0.0
 
+    session = run_scenarios(model, scenarios, scenario_runs, verbose) if scenarios else {}
+
     return {
+        **session,
         "preset": preset,
         "violations": bad,
         "total": total,
@@ -184,6 +286,12 @@ def parse_args() -> argparse.Namespace:
                         help="LLM presets to compare (default: every preset in models.yaml)")
     parser.add_argument("--runs", type=int, default=3,
                         help="samples per input (default: 3)")
+    parser.add_argument("--scenario-runs", type=int, default=1,
+                        help="sessions per scenario (default: 1 -- a scenario is "
+                             "4~6 generations already, so one pass per preset is "
+                             "the affordable default)")
+    parser.add_argument("--no-scenarios", action="store_true",
+                        help="single-shot regression inputs only (old behavior)")
     parser.add_argument("--verbose", action="store_true", help="print every reply")
     return parser.parse_args()
 
@@ -191,12 +299,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     presets = args.presets or registry.list_presets("llm")
+    scenarios = None if args.no_scenarios else load_scenarios()
 
     results = []
     for preset in presets:
         print(f"\n=== {preset} ===")
         try:
-            result = evaluate(preset, args.runs, args.verbose)
+            result = evaluate(preset, args.runs, args.verbose, scenarios, args.scenario_runs)
         except Exception as exc:
             # One unavailable model must not cost the whole comparison -- these
             # runs take minutes each.
@@ -209,26 +318,46 @@ def main() -> int:
             f"판박이 {result['distinct_rate']:.0%} distinct   {result['median_len']}자   "
             f"turn {result['total_s']:.2f}s   ({rules})"
         )
+        if scenarios:
+            print(
+                f"  문맥 {result['ctx_pass']}/{result['ctx_total']}   "
+                f"반복 {result['repeat_rate']:.0%}   "
+                f"후반위반 {result['late_bad']}/{result['late_total']}"
+            )
 
     if not results:
         print("\nNo preset could be evaluated.")
         return 1
 
+    scenario_cols = "" if args.no_scenarios else f"{'문맥':>8}{'반복':>7}{'후반위반':>10}"
     print(
-        f"\n{'preset':<22}{'위반':>9}{'되묻기':>8}{'판박이':>8}{'길이':>7}{'turn':>8}  주요 위반"
+        f"\n{'preset':<22}{'위반':>9}{'되묻기':>8}{'판박이':>8}{'길이':>7}{'turn':>8}"
+        f"{scenario_cols}  주요 위반"
     )
-    print("-" * 88)
+    print("-" * (88 + (0 if args.no_scenarios else 25)))
     for r in sorted(results, key=lambda r: (r["violations"] / max(r["total"], 1), r["total_s"])):
         rules = ", ".join(f"{k} {v}" for k, v in sorted(r["by_rule"].items(), key=lambda kv: -kv[1]))
-        print(
+        row = (
             f"{r['preset']:<22}{r['violations']:>3}/{r['total']:<5}"
             f"{r['invite_rate']:>7.0%}{r['distinct_rate']:>8.0%}{r['median_len']:>6}자"
-            f"{r['total_s']:>7.2f}s  {rules[:28]}"
+            f"{r['total_s']:>7.2f}s"
         )
+        if not args.no_scenarios:
+            row += (
+                f"{r['ctx_pass']:>5}/{r['ctx_total']:<2}"
+                f"{r['repeat_rate']:>6.0%}"
+                f"{r['late_bad']:>7}/{r['late_total']:<2}"
+            )
+        print(f"{row}  {rules[:28]}")
     print(
         "\nCPU 기준 (CM4 타깃과 같은 조건). 위반이 적고 되묻기가 높고 판박이가 100%에 가까울수록 좋다."
         "\n길이는 낮을수록 좋은 게 아니라 30~60자 근처가 적당하다 -- 전부 음성으로 나가기 때문."
     )
+    if not args.no_scenarios:
+        print(
+            "문맥은 심어둔 사실을 되물었을 때 답한 횟수, 반복은 연속 응답이 판박이인 비율,"
+            "\n후반위반은 3턴째부터의 규칙 위반 -- 드리프트가 있으면 단발 위반보다 여기가 먼저 나빠진다."
+        )
     return 0
 
 

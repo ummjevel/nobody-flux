@@ -1,0 +1,169 @@
+# Multi-turn persona evaluation scenarios for scripts/_ab_persona.py.
+#
+# Why this exists (docs/conversational-slm-research.md §5.3): the single-shot
+# regression INPUTS in _ab_persona.py cannot see the failures that actually
+# decide whether a model is livable company -- persona drift (반말이 4턴째에
+# 존댓말로 새는 것), context amnesia (3턴 전 이름을 잊는 것), and mechanical
+# repetition (매 턴 같은 되물음). Those only exist across turns.
+#
+# Format:
+#   scenarios:
+#     - name: short-slug            # shown in output
+#       axes: [문맥, 감정, ...]     # which evaluation axes this covers (doc only)
+#       turns:
+#         - user: "사용자 발화"      # fed to the model in order, one session
+#         - user: "..."
+#           expect_any: [지수, 진수] # optional: reply must contain at least one
+#                                    # of these substrings (cheap context check)
+#
+# Design rules:
+# - The user side is a FIXED script: every scenario must read naturally no
+#   matter what the model replied (no turn may depend on the previous answer's
+#   content). That is what makes runs comparable across presets and samples.
+# - 4~6 turns each: max_history_turns=6, and persona drift research (§2.3)
+#   says drift shows within a handful of turns.
+# - Sources: real failed turns from data/conversations.db first (the
+#   regression-set philosophy of the single-shot INPUTS), then hand-written
+#   turns to cover axes real sessions have not reached yet.
+# - expect_any is deliberately generous (any one substring passes): it is a
+#   context-amnesia detector, not an exact-answer grader. LLM-as-judge covers
+#   the finer axes later (research doc §3.3); this file feeds the cheap
+#   machine pass that filters before the judge.
+
+scenarios:
+  # -- 문맥 기억 -------------------------------------------------------------
+
+  - name: 이름-기억
+    axes: [문맥]
+    turns:
+      - user: "안녕, 나는 지수야"
+      - user: "오늘 처음 얘기해보는 거지?"
+      - user: "너 이름은 뭐야?"
+      - user: "내 이름 기억해?"
+        expect_any: ["지수"]
+
+  - name: 반려견-기억
+    axes: [문맥]
+    turns:
+      - user: "우리 강아지 이름은 콩이야"
+      - user: "산책을 엄청 좋아해"
+      - user: "근데 요즘 비가 와서 못 나가"
+      - user: "아까 우리 강아지 이름 뭐라고 했지?"
+        expect_any: ["콩이", "콩"]
+
+  - name: 피곤한-이유-기억
+    axes: [감정, 문맥]
+    turns:
+      - user: "오늘 진짜 피곤하다"
+      - user: "회사에서 하루 종일 회의만 했거든"
+      - user: "저녁도 대충 때웠어"
+      - user: "내가 아까 왜 피곤하다고 했는지 기억해?"
+        expect_any: ["회의", "회사"]
+
+  # -- 감정 -------------------------------------------------------------------
+
+  - name: 위로-짜증
+    axes: [감정, 드리프트]
+    turns:
+      - user: "아 진짜 짜증나"
+      - user: "버스를 눈앞에서 놓쳤어"
+      - user: "그래서 삼십 분을 기다렸잖아"
+      - user: "이런 날은 그냥 다 귀찮아"
+      - user: "너라면 이럴 때 뭐 해?"
+
+  - name: 축하-좋은일
+    axes: [감정]
+    turns:
+      - user: "나 오늘 좋은 일 있었다?"
+      - user: "발표를 했는데 팀장님이 칭찬해줬어"
+      - user: "오랜만에 기분이 좋네"
+      - user: "이따 맛있는 거 먹으려고"
+
+  - name: 감정-전환
+    axes: [감정, 화제전환]
+    turns:
+      - user: "주말에 영화 봤는데 진짜 재밌었어"
+      - user: "근데 갑자기 생각나서 말인데"
+      - user: "요즘 친구랑 좀 서먹해졌어"
+      - user: "내가 먼저 연락해보는 게 맞겠지?"
+
+  # -- 회피 규칙 (지식/건강/돈) ------------------------------------------------
+
+  - name: 지식-회피
+    axes: [회피, 드리프트]
+    turns:
+      - user: "너 조선시대 왕 순서 다 알아?"
+      - user: "그럼 제일 유명한 왕은 누구야?"
+      - user: "몰라도 돼, 그냥 궁금했어"
+      - user: "너는 뭐 궁금한 거 없어?"
+
+  - name: 건강-회피
+    axes: [회피]
+    turns:
+      - user: "요즘 허리가 계속 아파"
+      - user: "파스 붙이면 나을까?"
+      - user: "병원 가기는 귀찮은데"
+      - user: "알겠어, 주말에 가볼게"
+
+  - name: 돈-회피
+    axes: [회피]
+    turns:
+      - user: "요즘 주식 시작해볼까 하는데"
+      - user: "뭐 사면 좋을지 추천해줄래?"
+      - user: "그래도 하나만 찍어줘 봐"
+      - user: "알았어 알았어, 안 물어볼게"
+
+  # -- 규칙 유도 (숫자/앵무새) -------------------------------------------------
+
+  - name: 숫자-연타
+    axes: [규칙]
+    turns:
+      - user: "너 몇 살이야?"
+      - user: "그럼 생일은 언제야?"
+      - user: "나는 아침 일곱 시에 일어나"
+      - user: "너는 몇 시가 제일 좋아?"
+
+  - name: 앵무새-유도
+    axes: [규칙]
+    turns:
+      - user: "이번 주말에 갈 만한 조용한 산책 코스 추천해줘"
+      - user: "사람 없고 조용한 데면 좋겠어"
+      - user: "그냥 같이 얘기나 하자"
+
+  # -- ASR 오인식 강건성 (실사용 실패 그대로 -- conversations.db 세션 2/9) -----
+
+  - name: asr-오인식
+    axes: [강건성]
+    turns:
+      - user: "오늘 산체코 추천해줘"     # "산책 코스"의 실제 오인식
+      - user: "코 추천해 줘"             # pre-roll 손실로 머리가 잘린 실물
+      - user: "아니 산책 코스 말이야"
+      - user: "됐고, 오늘 날씨나 얘기하자"
+
+  # -- 반복/판박이 -------------------------------------------------------------
+
+  - name: 반복-유도
+    axes: [반복]
+    turns:
+      - user: "오늘 점심 뭐 먹지?"
+      - user: "저녁은 뭐 먹지?"
+      - user: "내일 아침은 뭐 먹지?"
+      - user: "맨날 메뉴 고르는 게 제일 어렵다"
+
+  - name: 심심한-대화-지속
+    axes: [반복, 드리프트]
+    turns:
+      - user: "심심하다"
+      - user: "그러게"
+      - user: "음 딱히 없는데"
+      - user: "너가 아무 얘기나 해봐"
+
+  # -- 정체성 ------------------------------------------------------------------
+
+  - name: 정체성-연타
+    axes: [정체성, 드리프트]
+    turns:
+      - user: "너 누구야?"
+      - user: "AI야?"
+      - user: "누가 만들었어?"
+      - user: "그래도 얘기하다 보면 사람 같아"
