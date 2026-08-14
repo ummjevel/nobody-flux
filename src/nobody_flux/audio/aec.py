@@ -137,3 +137,15 @@ class SpeexEchoCanceller(EchoCanceller):
         if len(cleaned) != len(mic):
             cleaned = np.resize(cleaned, len(mic))
         return np.ascontiguousarray(cleaned, dtype=np.float32)
+
+    def reset(self) -> None:
+        """Rebuild the adaptive filter. The base-class reset() was a silent
+        no-op here (code-review #5's footnote): AudioSession.stop_playback()
+        was 'resetting' an object that never dropped its state. A filter that
+        adapted onto a reply mid-echo diverges when playback cuts abruptly;
+        starting clean at the turn boundary reconverges in well under a
+        second, which is cheaper than dragging a diverged tail into the next
+        reply."""
+        from speexdsp import EchoCanceller as _SpeexEC
+
+        self._ec = _SpeexEC.create(self.frame_size, self.filter_length)

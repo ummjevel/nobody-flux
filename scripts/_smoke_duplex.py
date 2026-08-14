@@ -226,7 +226,7 @@ def main() -> int:
     if live["barge_in"]:
         print(
             f"  FAIL the reply interrupted itself {live['barge_in']} time(s). The echo "
-            "canceller is not removing enough of the playback, or delay_frames in "
+            "canceller is not removing enough of the playback, or delay_ms in "
             "configs/audio.yaml is wrong (re-run _calibrate_aec_delay.py)."
         )
         ok = False

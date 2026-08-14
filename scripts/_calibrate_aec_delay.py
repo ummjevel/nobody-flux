@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Measure the speaker->mic acoustic delay and write it to configs/audio.yaml
-(delay_frames), so the reference-gate echo canceller (src/nobody_flux/aec.py's
-ReferenceGate, used by audio.py's SharedStreamSession) aligns the reply it's
-playing with the echo the mic actually hears. Speex models the delay itself, but
-the gate needs it explicitly -- an unmeasured delay is why every threshold in
-this repo is "실측 전 추정치".
+(delay_ms), so the reference-gate echo canceller (src/nobody_flux/audio/aec.py's
+ReferenceGate, used by SharedStreamSession) aligns the reply it's playing with
+the echo the mic actually hears. Speex models the delay itself, but the gate
+needs it explicitly -- an unmeasured delay is why every threshold in this repo
+was "실측 전 추정치".
 
 How: play a short chirp while recording simultaneously (sd.playrec keeps the two
-sample-aligned), then cross-correlate the recording against the chirp. The lag at
-the correlation peak is the round-trip delay; delay_frames = round(lag / 480).
+sample-aligned), then cross-correlate the recording against the chirp. The lag
+at the correlation peak is the round-trip delay, written out in milliseconds at
+the measurement's own (sub-frame) precision. It used to be quantized to 30ms
+frames, which threw the precision away and misaligned the reference by up to
+±15ms -- enough to decorrelate speech and make the gate untunable
+(docs/code-review-20260814.md #5).
 
 Run it on the actual device (mic + speaker in their real positions), NOT over an
 SSH/WSL passthrough that adds its own buffering:
@@ -73,13 +77,13 @@ def measure_delay_samples(chirp: np.ndarray, tail_s: float = 0.5, repeats: int =
     return int(np.median(lags))
 
 
-def write_delay_frames(delay_frames: int) -> None:
-    """Rewrite just the `delay_frames:` line in configs/audio.yaml, preserving
+def write_delay_ms(delay_ms: float) -> None:
+    """Rewrite just the `delay_ms:` line in configs/audio.yaml, preserving
     the file's comments (a full yaml round-trip would strip them)."""
     text = AUDIO_CONFIG.read_text(encoding="utf-8")
-    new, n = re.subn(r"(?m)^delay_frames:.*$", f"delay_frames: {delay_frames}", text)
+    new, n = re.subn(r"(?m)^delay_ms:.*$", f"delay_ms: {delay_ms:.1f}", text)
     if n == 0:
-        new = text.rstrip() + f"\ndelay_frames: {delay_frames}\n"
+        new = text.rstrip() + f"\ndelay_ms: {delay_ms:.1f}\n"
     AUDIO_CONFIG.write_text(new, encoding="utf-8")
 
 
@@ -101,17 +105,17 @@ def main():
 
     print(f"Measuring speaker->mic delay ({args.repeats} trials). Stay quiet...")
     delay_samples = measure_delay_samples(make_chirp(), repeats=args.repeats)
-    delay_frames = round(delay_samples / FRAME_SAMPLES)
+    delay_ms = delay_samples * 1000 / SAMPLE_RATE
     print(
-        f"\nmedian delay = {delay_samples} samples "
-        f"({delay_samples * 1000 / SAMPLE_RATE:.0f}ms) = {delay_frames} frames"
+        f"\nmedian delay = {delay_samples} samples ({delay_ms:.1f}ms) "
+        f"= {round(delay_samples / FRAME_SAMPLES)} frames"
     )
 
     if args.dry_run:
         print("(--dry-run: not writing configs/audio.yaml)")
         return
-    write_delay_frames(delay_frames)
-    print(f"wrote delay_frames: {delay_frames} to {AUDIO_CONFIG}")
+    write_delay_ms(delay_ms)
+    print(f"wrote delay_ms: {delay_ms:.1f} to {AUDIO_CONFIG}")
 
 
 if __name__ == "__main__":

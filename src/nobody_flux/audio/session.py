@@ -44,7 +44,6 @@ platform + installed libs, overridable via configs/audio.yaml / --aec.
 
 from __future__ import annotations
 
-import collections
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -67,6 +66,13 @@ FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_MS / 1000)  # 480, matches turn/vad.py
 # act is answering a pop. 0.5s covers the measured transient with margin and is
 # paid once per session, inside model loading time.
 WARMUP_FRAMES = int(500 / FRAME_MS)
+
+# Upper bound on captured frames waiting for the VAD to read them (~15s at
+# 30ms/frame). The queue's sole consumer is the capture thread; if that thread
+# dies or stalls, an unbounded queue grows at ~64KB/s for as long as the device
+# keeps running. Bounded + drop-oldest keeps the *newest* audio, so a consumer
+# that recovers resumes near real time instead of replaying a backlog.
+CAPTURE_QUEUE_MAX_FRAMES = 512
 
 __all__ = [
     "AudioSession",
@@ -149,12 +155,18 @@ class SharedStreamSession(AudioSession):
     returns numpy arrays, so its logic is testable without opening a device."""
 
     echo_canceller: EchoCanceller = field(default_factory=ReferenceGate)
-    # Speaker->mic acoustic round-trip, in 30ms frames, used to align the
-    # reference for gate-style cancellers (Speex models the delay itself within
-    # its filter tail, so this mostly matters for ReferenceGate). 4 frames =
-    # 120ms is a loose default; scripts/_calibrate_aec_delay.py measures the
-    # real value into configs/audio.yaml.
+    # Speaker->mic acoustic round-trip, in 30ms frames. Legacy fallback for
+    # delay_ms below -- frame granularity quantizes a measured 28ms to 30ms,
+    # and that ±15ms error alone decorrelates a speech waveform enough to make
+    # ReferenceGate's corr_threshold untunable (code-review #5). Kept so old
+    # configs still work; delay_ms wins when both are set.
     delay_frames: int = 4
+    # Speaker->mic round-trip in milliseconds, at sample granularity. This is
+    # what scripts/_calibrate_aec_delay.py actually measures (its correlation
+    # peak is sub-frame precise; quantizing to frames used to throw that
+    # precision away). Speex models delay inside its filter tail, so this
+    # mostly matters for ReferenceGate.
+    delay_ms: float | None = None
     input_device: int | str | None = None
     output_device: int | str | None = None
     # Preferred PortAudio host API, by substring match against its reported
@@ -195,10 +207,14 @@ class SharedStreamSession(AudioSession):
     def __post_init__(self):
         self._lock = threading.Lock()
         self._play_buf = np.zeros(0, dtype=np.float32)
-        self._captured: queue.Queue = queue.Queue()
-        # Ring of recently-played frames; the one delay_frames back is the
-        # reference the mic is hearing now.
-        self._ref_ring: collections.deque = collections.deque(maxlen=self.delay_frames + 1)
+        self._captured: queue.Queue = queue.Queue(maxsize=CAPTURE_QUEUE_MAX_FRAMES)
+        # Tail of recently-played samples; the window delay_samples back is the
+        # reference the mic is hearing now. Sample-granular (see delay_ms).
+        effective_delay_ms = (
+            self.delay_ms if self.delay_ms is not None else self.delay_frames * FRAME_MS
+        )
+        self._delay_samples = max(0, int(round(SAMPLE_RATE * effective_delay_ms / 1000)))
+        self._ref_tail = np.zeros(0, dtype=np.float32)
         self._active = threading.Event()
         self._stream = None
         # Resolved by start(); until then the device rate is assumed to be the
@@ -331,7 +347,22 @@ class SharedStreamSession(AudioSession):
         mic = resample_to(mic, self._device_rate, SAMPLE_RATE)
         played = self._fill_output(len(mic))
         outdata[:, 0] = self._to_device(played, frames)
-        self._captured.put(self._process_block(mic, played))
+        block = self._process_block(mic, played)
+        # Non-blocking with drop-oldest: this runs inside the PortAudio
+        # callback, which must never wait, and a full queue means the consumer
+        # is stalled or dead -- the newest audio is the only part still worth
+        # keeping.
+        try:
+            self._captured.put_nowait(block)
+        except queue.Full:
+            try:
+                self._captured.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._captured.put_nowait(block)
+            except queue.Full:
+                pass
 
     def _to_device(self, played: np.ndarray, frames: int) -> np.ndarray:
         """The 16kHz frame just consumed, at the device's rate and exactly
@@ -365,15 +396,24 @@ class SharedStreamSession(AudioSession):
 
     def _process_block(self, mic: np.ndarray, played: np.ndarray) -> np.ndarray:
         """Given the captured mic frame and the frame just played, return the
-        echo-cancelled mic frame. Reference is the played frame delayed by
-        delay_frames (for gate-style cancellers)."""
-        self._ref_ring.append(played)
-        if len(self._ref_ring) > self.delay_frames:
-            ref = self._ref_ring[0]
-        else:
-            ref = played
-        if len(ref) != len(mic):
-            ref = np.resize(ref, len(mic))
+        echo-cancelled mic frame. Reference is the played signal delayed by
+        delay_ms, cut at *sample* granularity -- gate-style cancellers correlate
+        raw waveforms, and speech decorrelates within a few ms of misalignment,
+        so frame-quantized delay made the gate untunable (code-review #5)."""
+        self._ref_tail = np.concatenate([self._ref_tail, played])
+        # The reference window for this mic frame ends delay_samples before
+        # "now" (the end of what has been played) and spans one frame. Samples
+        # from before playback started read as zeros.
+        end = len(self._ref_tail) - self._delay_samples
+        start = end - len(mic)
+        ref = np.zeros(len(mic), dtype=np.float32)
+        lo = max(start, 0)
+        if end > lo:
+            ref[lo - start : lo - start + (end - lo)] = self._ref_tail[lo:end]
+        # Trim to what the next frame's window can still reach.
+        keep = self._delay_samples + len(mic)
+        if len(self._ref_tail) > keep:
+            self._ref_tail = self._ref_tail[-keep:]
         return self.echo_canceller.process(mic, ref)
 
     def read_frame(self) -> np.ndarray:
@@ -390,6 +430,10 @@ class SharedStreamSession(AudioSession):
         with self._lock:
             self._play_buf = np.zeros(0, dtype=np.float32)
             self._active.clear()
+        # _ref_tail is deliberately NOT cleared: the last played samples are
+        # still physically echoing for delay_ms after the speaker cuts, and the
+        # tail is exactly the reference those in-flight frames need. It flushes
+        # itself with zeros within delay_ms + one frame.
         self.echo_canceller.reset()
 
     def playback_active(self) -> bool:
@@ -558,16 +602,25 @@ def select_backend(prefer: str) -> str:
     return "shared-refgate"
 
 
-def build_session(backend: str, delay_frames: int = 4) -> AudioSession:
+def build_session(
+    backend: str, delay_frames: int = 4, delay_ms: float | None = None
+) -> AudioSession:
     """Instantiate a resolved (non-``'auto'``) backend name. See
-    select_backend, which is what turns a preference into one of these names."""
+    select_backend, which is what turns a preference into one of these names.
+    ``delay_ms`` (sample-granular) wins over ``delay_frames`` when given."""
     if backend == "off":
-        return SharedStreamSession(echo_canceller=PassThrough(), delay_frames=delay_frames)
+        return SharedStreamSession(
+            echo_canceller=PassThrough(), delay_frames=delay_frames, delay_ms=delay_ms
+        )
     if backend == "shared-refgate":
-        return SharedStreamSession(echo_canceller=ReferenceGate(), delay_frames=delay_frames)
+        return SharedStreamSession(
+            echo_canceller=ReferenceGate(), delay_frames=delay_frames, delay_ms=delay_ms
+        )
     if backend == "shared-speex":
         return SharedStreamSession(
-            echo_canceller=SpeexEchoCanceller(frame_size=FRAME_SAMPLES), delay_frames=delay_frames
+            echo_canceller=SpeexEchoCanceller(frame_size=FRAME_SAMPLES),
+            delay_frames=delay_frames,
+            delay_ms=delay_ms,
         )
     if backend == "os-echocancel":
         if IS_WINDOWS or IS_MACOS:

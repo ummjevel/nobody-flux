@@ -17,7 +17,17 @@
 # macOS/CoreAudio err -50 conflict that talk.py's --no-barge-in works around.
 backend: auto
 
-# Speaker->mic acoustic round-trip delay, in 30ms frames, used to align the
-# reference for the gate-style canceller (Speex models the delay itself).
+# Speaker->mic acoustic round-trip delay in milliseconds, at sample
+# granularity, used to align the reference for the gate-style canceller
+# (Speex models the delay itself inside its filter tail).
 # scripts/_calibrate_aec_delay.py measures the real value and rewrites this.
+#
+# Sample-granular on purpose (code-review #5): the gate correlates raw
+# waveforms, and speech decorrelates within a few ms of misalignment -- the
+# old delay_frames quantized a measured 28ms to 30ms, and that ±15ms error
+# alone pushed the correlation toward 0, making corr_threshold untunable.
+# 28 is the Windows box measurement (5-run median); re-run the calibration
+# per device rather than copying this number.
+delay_ms: 28
+# Legacy frame-granular fallback, only consulted when delay_ms is absent.
 delay_frames: 1
