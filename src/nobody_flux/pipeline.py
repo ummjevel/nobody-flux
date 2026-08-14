@@ -14,6 +14,8 @@ not full-duplex barge-in.
 
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
@@ -25,6 +27,16 @@ from .stage.asr import NobodyASR
 from .stage.llm import NobodyLLM
 from .stage.tts import NobodyTTS
 from .textchunk import SentenceChunker, sanitize_for_tts
+
+# How many sentence chunks may sit queued for synthesis ahead of the TTS
+# worker. Small on purpose: the queue exists so the LLM keeps decoding while a
+# sentence synthesizes (code-review #2), not to synthesize a whole reply ahead
+# of playback -- a deep queue would just turn a barge-in into wasted synthesis.
+# 2 is enough to keep the worker fed across chunk boundaries.
+TTS_QUEUE_DEPTH = 2
+
+# Sentinel telling the synthesis worker there is no more text coming.
+_TTS_DONE = object()
 
 
 @dataclass
@@ -252,78 +264,210 @@ class STSPipeline:
         stage_start("llm")
         chunker = SentenceChunker()
         llm_t0 = time.perf_counter()
-        tts_total = 0.0
-        ttfa_ms: int | None = None
-        index = 0
         reply_pieces: list[str] = []
 
-        def synth(text: str) -> AudioChunk | None:
+        # -- TTS worker (code-review #2) --------------------------------------
+        # Synthesis used to run synchronously inside this loop, and the default
+        # GGUF stream only decodes when pulled -- so while a sentence was being
+        # synthesized, token generation was zero and total response time was
+        # sum(llm) + sum(tts) instead of their overlap. One worker thread keeps
+        # the LLM decoding while TTS runs; a *single* worker, so chunk order is
+        # preserved without any re-sequencing.
+        tts_state = {"total_s": 0.0, "ttfa_ms": None, "index": 0, "started": False}
+        work_q: queue.Queue = queue.Queue(maxsize=TTS_QUEUE_DEPTH)
+        out_q: queue.Queue = queue.Queue()
+        worker_done = False
+
+        def synth_one(text: str) -> AudioChunk | None:
             """Synthesize one chunk, or None if it isn't speakable / produced no
             audio (see sanitize_for_tts). A None chunk costs no index/ttfa so an
             emoji-only fragment simply vanishes instead of becoming a silent,
-            unplayable (0-sample, sr=0) chunk."""
-            nonlocal tts_total, ttfa_ms, index
+            unplayable (0-sample, sr=0) chunk. Runs on the worker thread."""
             clean = sanitize_for_tts(text)
             if not clean:
                 return None
+            if not tts_state["started"]:
+                # Before the first synthesis *begins*, not after it ends -- the
+                # old placement made talk.py's "[TTS] synthesizing..." line
+                # appear only once the first chunk was already done.
+                tts_state["started"] = True
+                stage_start("tts")
             ts = time.perf_counter()
             samples, sr = self.tts.synthesize_audio(clean)
-            tts_total += time.perf_counter() - ts
+            tts_state["total_s"] += time.perf_counter() - ts
             if samples.size == 0:
                 return None
-            if ttfa_ms is None:
-                ttfa_ms = round((time.perf_counter() - t0) * 1000)
-                stage_start("tts")
-            index += 1
-            return AudioChunk(samples=samples, sample_rate=sr, index=index, text=clean)
+            if tts_state["ttfa_ms"] is None:
+                tts_state["ttfa_ms"] = round((time.perf_counter() - t0) * 1000)
+            tts_state["index"] += 1
+            return AudioChunk(
+                samples=samples, sample_rate=sr, index=tts_state["index"], text=clean
+            )
 
-        stream = self.llm.reply_stream(user_text)
-        for piece in stream:
-            reply_pieces.append(piece)
-            # Polled once per delta -- the finest granularity available without
-            # reaching inside the model's own generation loop, and fine enough
-            # that a barge-in costs at most one token's worth of extra work.
-            if cancelled():
-                # close() propagates GeneratorExit into reply_stream, which
-                # stops the underlying generation thread and, importantly, lets
-                # it skip the history update -- an interrupted reply the user
-                # never heard should not become conversational context.
-                stream.close()
+        def tts_worker() -> None:
+            while True:
+                text = work_q.get()
+                if text is _TTS_DONE:
+                    out_q.put(_TTS_DONE)
+                    return
+                try:
+                    out_q.put(synth_one(text))
+                except Exception as exc:  # surfaced on the consuming thread
+                    out_q.put(exc)
+                    return
+
+        def handle(item) -> AudioChunk | None:
+            """Classify one out_q item; raises a worker exception here, on the
+            consuming thread, exactly where the synchronous version raised."""
+            nonlocal worker_done
+            if item is _TTS_DONE:
+                worker_done = True
+                return None
+            if isinstance(item, Exception):
+                worker_done = True
+                raise item
+            return item
+
+        def abort_worker() -> None:
+            """Stop the worker and discard whatever it hadn't spoken yet. A
+            sentence already inside synthesize_audio() finishes (it is not
+            interruptible) and is thrown away. Idempotent -- also the finally
+            path for GeneratorExit, when the caller close()s mid-reply."""
+            nonlocal worker_done
+            if not worker_done:
+                while True:
+                    try:
+                        work_q.get_nowait()
+                    except queue.Empty:
+                        break
+                work_q.put(_TTS_DONE)
+                while not worker_done:
+                    item = out_q.get()
+                    if item is _TTS_DONE or isinstance(item, Exception):
+                        # A worker that died while being aborted is not worth
+                        # re-raising over -- the reply is being discarded anyway.
+                        worker_done = True
+            worker.join()
+
+        worker = threading.Thread(target=tts_worker, name="tts-synth", daemon=True)
+        worker.start()
+
+        # Latched, not re-polled (code-review #8): the summary's `cancelled`
+        # means "work was actually abandoned", so a barge-in that lands after
+        # the last chunk was already yielded does not retroactively mark a
+        # fully-delivered reply as cancelled (which used to drop it from
+        # storage and memory extraction entirely).
+        interrupted = False
+
+        try:
+            stream = self.llm.reply_stream(user_text)
+            for piece in stream:
+                reply_pieces.append(piece)
+                # Polled once per delta -- the finest granularity available
+                # without reaching inside the model's own generation loop, and
+                # fine enough that a barge-in costs at most one token's worth
+                # of extra work.
+                if cancelled():
+                    # close() propagates GeneratorExit into reply_stream, which
+                    # stops the underlying generation and, importantly, lets it
+                    # skip the history update -- an interrupted reply the user
+                    # never heard should not become conversational context.
+                    stream.close()
+                    interrupted = True
+                    break
+                for chunk_text in chunker.push(piece):
+                    while True:
+                        try:
+                            work_q.put_nowait(chunk_text)
+                            break
+                        except queue.Full:
+                            # The worker is a couple of sentences behind. Keep
+                            # the caller supplied with finished audio while
+                            # waiting for space, and keep watching for barge-in
+                            # so a full queue can't delay cancellation.
+                            if cancelled():
+                                stream.close()
+                                interrupted = True
+                                break
+                            try:
+                                chunk = handle(out_q.get(timeout=0.05))
+                            except queue.Empty:
+                                continue
+                            if chunk is not None:
+                                yield chunk
+                    if interrupted:
+                        break
+                if interrupted:
+                    break
+                # Hand over whatever the worker finished during this delta.
+                while not worker_done:
+                    try:
+                        item = out_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    chunk = handle(item)
+                    if chunk is not None:
+                        yield chunk
+
+            if interrupted:
+                abort_worker()
                 return summary(
                     user_text=user_text,
                     reply_text="".join(reply_pieces).strip(),
                     asr_ms=asr_ms,
                     llm_ms=round((time.perf_counter() - llm_t0) * 1000),
-                    tts_ms=round(tts_total * 1000),
-                    ttfa_ms=ttfa_ms,
-                    n_chunks=index,
+                    tts_ms=round(tts_state["total_s"] * 1000),
+                    ttfa_ms=tts_state["ttfa_ms"],
+                    n_chunks=tts_state["index"],
                     cancelled=True,
                 )
-            for chunk_text in chunker.push(piece):
-                chunk = synth(chunk_text)
+
+            llm_ms = round((time.perf_counter() - llm_t0) * 1000)
+            reply_text = "".join(reply_pieces).strip()
+            result("llm", reply_text, llm_ms)
+
+            tail = chunker.flush()
+            if tail and cancelled():
+                # The tail will never be spoken -- that is abandoned work, so
+                # this is a genuine cancellation (unlike the post-yield re-poll
+                # this replaces).
+                interrupted = True
+                abort_worker()
+                return summary(
+                    user_text=user_text,
+                    reply_text=reply_text,
+                    asr_ms=asr_ms,
+                    llm_ms=llm_ms,
+                    tts_ms=round(tts_state["total_s"] * 1000),
+                    ttfa_ms=tts_state["ttfa_ms"],
+                    n_chunks=tts_state["index"],
+                    cancelled=True,
+                )
+            if tail:
+                work_q.put(tail)
+            work_q.put(_TTS_DONE)
+            while not worker_done:
+                chunk = handle(out_q.get())
                 if chunk is not None:
                     yield chunk
+            worker.join()
 
-        llm_ms = round((time.perf_counter() - llm_t0) * 1000)
-        reply_text = "".join(reply_pieces).strip()
-        result("llm", reply_text, llm_ms)
-
-        tail = chunker.flush()
-        if tail and not cancelled():
-            chunk = synth(tail)
-            if chunk is not None:
-                yield chunk
-
-        return summary(
-            user_text=user_text,
-            reply_text=reply_text,
-            asr_ms=asr_ms,
-            llm_ms=llm_ms,
-            tts_ms=round(tts_total * 1000),
-            ttfa_ms=ttfa_ms,
-            n_chunks=index,
-            cancelled=cancelled(),
-        )
+            return summary(
+                user_text=user_text,
+                reply_text=reply_text,
+                asr_ms=asr_ms,
+                llm_ms=llm_ms,
+                tts_ms=round(tts_state["total_s"] * 1000),
+                ttfa_ms=tts_state["ttfa_ms"],
+                n_chunks=tts_state["index"],
+                cancelled=False,
+            )
+        finally:
+            # Runs on every exit: normal return (worker already joined),
+            # cancellation (already aborted), GeneratorExit from the caller
+            # closing us mid-reply, or a raising stage. Guarantees no orphaned
+            # synthesis thread survives the turn.
+            abort_worker()
 
     def close(self) -> None:
         """Release persistent subprocess resources (server-backed ASR/TTS

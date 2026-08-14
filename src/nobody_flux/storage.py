@@ -10,8 +10,9 @@ Three tables:
   - turns: one row per exchange, including which ASR/LLM/TTS preset produced
     it and how long each stage took -- this doubles as a benchmark log once
     more presets exist in configs/models.yaml (see registry.py)
-  - memories: schema only for now. Nothing writes to this table yet -- see
-    docs/memory-design.md for the extraction design this is waiting on.
+  - memories: facts extracted at session end (memory.py's extraction/
+    consolidation passes write via save_memory/update_memory; recall reads
+    via recent_memories). See docs/memory-design.md.
 
 One connection per ConversationStore, opened once and kept for the instance's
 lifetime (not reopened + re-CREATE-TABLE'd on every call) -- talk.py logs a
@@ -51,12 +52,16 @@ CREATE TABLE IF NOT EXISTS turns (
     tts_preset TEXT,
     asr_ms INTEGER,
     llm_ms INTEGER,
-    tts_ms INTEGER
+    tts_ms INTEGER,
+    -- 1 when the reply was cut off by a barge-in. A partially-heard reply is
+    -- still real conversation history (the user reacted to it), so it is
+    -- logged rather than dropped -- see docs/code-review-20260814.md #8.
+    cancelled INTEGER NOT NULL DEFAULT 0
 );
 
--- Schema only -- see docs/memory-design.md. Nothing populates this table yet;
--- it exists so the extraction pass (when built) has somewhere to write
--- without a migration.
+-- Facts extracted from sessions -- see docs/memory-design.md and
+-- src/nobody_flux/memory.py (extraction writes, recall reads, consolidation
+-- updates in place).
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
@@ -82,7 +87,26 @@ class ConversationStore:
         self.db_path = Path(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
+        # WAL + NORMAL: log_turn commits on the main thread once per exchange,
+        # and the default journal mode fsyncs the full rollback-journal dance
+        # each time -- tens to hundreds of ms on the CM4's SD card, paid inside
+        # the conversation loop. WAL makes a commit one sequential append, and
+        # synchronous=NORMAL drops the per-commit fsync while still surviving
+        # application crashes (the WAL is replayed); the exposure left is a
+        # power loss costing the last few turns of *log*, not the models or
+        # the conversation itself. Standard trade for this workload.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA)
+        # Migration for databases created before the column existed. CREATE
+        # TABLE IF NOT EXISTS never alters an existing table, so the schema
+        # above only covers fresh files.
+        try:
+            self._conn.execute(
+                "ALTER TABLE turns ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already present
 
     def close(self) -> None:
         self._conn.close()
@@ -116,6 +140,7 @@ class ConversationStore:
         asr_ms: int | None = None,
         llm_ms: int | None = None,
         tts_ms: int | None = None,
+        cancelled: bool = False,
     ) -> int:
         with self._conn:
             cur = self._conn.execute(
@@ -124,8 +149,8 @@ class ConversationStore:
                     session_id, turn_index, ts, user_text, reply_text,
                     user_wav_path, reply_wav_path,
                     asr_preset, llm_preset, tts_preset,
-                    asr_ms, llm_ms, tts_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    asr_ms, llm_ms, tts_ms, cancelled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -141,6 +166,7 @@ class ConversationStore:
                     asr_ms,
                     llm_ms,
                     tts_ms,
+                    int(cancelled),
                 ),
             )
             return cur.lastrowid

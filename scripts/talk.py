@@ -74,7 +74,12 @@ from src.nobody_flux.memory import consolidate_memories, extract_memories, forma
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
 from src.nobody_flux.turn.backchannel import is_backchannel, is_empty_transcript
-from src.nobody_flux.turn.controller import CapturedTurn, TurnController, TurnState
+from src.nobody_flux.turn.controller import (
+    CaptureFailed,
+    CapturedTurn,
+    TurnController,
+    TurnState,
+)
 from src.nobody_flux.turn.vad import VadEvent
 
 SESSION_AUDIO_DIR = PROJECT_ROOT / "data" / "sessions"
@@ -381,7 +386,8 @@ class ConversationSession:
             if turn is None or turn.utterance.audio.size == 0:
                 continue
             logger.info(
-                f"[VAD] turn captured ({turn.duration_s:.1f}s)"
+                f"[VAD] turn captured ({turn.speech_duration_s:.1f}s speech, "
+                f"{turn.duration_s:.1f}s buffer)"
                 + (f' streamed="{turn.streamed_text}"' if turn.streamed_text else "")
             )
             self._note_streaming_asr(turn)
@@ -460,8 +466,11 @@ class ConversationSession:
             # recognition found no words at all and there is nothing to answer;
             # a bare "어"/"응" is backchannel, which docs/barge-in-design.md
             # calls stage 2. Both cost an LLM call and a stored turn otherwise.
+            # speech_duration_s, not duration_s: the buffer length includes
+            # pre_roll_ms (500ms) of padding, which pushed every capture past
+            # BACKCHANNEL_MAX_DURATION_S and made this gate dead code.
             should_continue_after_asr=lambda text: not (
-                is_empty_transcript(text) or is_backchannel(text, turn.duration_s)
+                is_empty_transcript(text) or is_backchannel(text, turn.speech_duration_s)
             ),
             # Phase 4: polled between LLM deltas, so an interruption lands
             # during generation rather than after it.
@@ -484,8 +493,36 @@ class ConversationSession:
         finally:
             player.done()
 
-        if summary is None or summary.get("cancelled"):
+        if summary is None:
+            # The generator was closed on player.stop_requested() before it
+            # could return its summary -- there is nothing reliable to log.
             logger.info("[playback] reply interrupted")
+            return
+        if summary.get("cancelled"):
+            logger.info("[playback] reply interrupted")
+            # A partially-heard reply is still real conversation history: the
+            # user reacted to it, and a session consisting only of interrupted
+            # replies used to extract zero memories because none of its turns
+            # were ever logged (code-review #8).
+            if chunks and chunk_rate is not None:
+                sf.write(str(wav_out), np.concatenate(chunks), chunk_rate)
+            if summary.get("reply_text"):
+                self.store.log_turn(
+                    self.session_id,
+                    turn.index,
+                    summary["user_text"],
+                    summary["reply_text"],
+                    user_wav_path=str(wav_in),
+                    reply_wav_path=str(wav_out) if chunks else None,
+                    asr_preset=self.presets["asr"],
+                    llm_preset=self.presets["llm"],
+                    tts_preset=self.presets["tts"],
+                    asr_ms=summary["asr_ms"],
+                    llm_ms=summary["llm_ms"],
+                    tts_ms=summary["tts_ms"],
+                    cancelled=True,
+                )
+                self.turns_handled += 1
             return
         if summary.get("skipped"):
             text = summary["user_text"]
@@ -496,7 +533,7 @@ class ConversationSession:
                 # input is degenerate for it, so without a level here the
                 # session looks busy while recognizing nothing.
                 logger.info(
-                    f"[VAD] 인식된 말 없음 ({turn.duration_s:.1f}s, "
+                    f"[VAD] 인식된 말 없음 ({turn.speech_duration_s:.1f}s, "
                     f"레벨 {self._level(turn):.4f}) — 무시"
                 )
                 self.empty_turns += 1
@@ -641,6 +678,11 @@ def main() -> None:
         # a line here that gap is indistinguishable from Ctrl+C having been
         # ignored, and the natural response is to press it again.
         logger.info("Ctrl+C -- 정리 중 (기억 추출까지 몇 초 걸려. 다시 누르면 건너뜀)")
+    except CaptureFailed as exc:
+        # The capture thread died (device unplugged, transcriber/VAD error) --
+        # the session cannot hear anything anymore, so end it cleanly rather
+        # than raise a traceback. __cause__ carries the original exception.
+        logger.error(f"[audio] 캡처 스레드가 죽었어 — 세션 종료: {exc.__cause__ or exc}")
     finally:
         # Stop capture first: it is the only thread that can still queue work,
         # and letting it run while the pipeline is torn down would race.
