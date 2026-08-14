@@ -12,10 +12,9 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 [`docs/memory-design.md`](docs/memory-design.md), 끼어들기 설계는
 [`docs/barge-in-design.md`](docs/barge-in-design.md) 참고.
 
-> ⚠️ **턴테이킹 경로는 아직 사람이 검증하지 않았다.** 자동 테스트 146개는 코드 정확성만
-> 보증한다. 남은 사람 검증 항목(대화 루프, 맞장구 판정, AEC 스피커 실험)은
-> [`docs/FEATURES.md`의 "사람이 직접 해야 할 검증"](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료)에
-> 체크리스트로 정리돼 있다.
+> ⚠️ **턴테이킹 경로는 아직 사람이 말해보며 검증하지 않았다** — 자동 테스트 146개는 코드
+> 정확성까지만 보증한다. 남은 항목은
+> [사람이 직접 해야 할 검증](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료) 체크리스트에.
 
 ## 아키텍처
 
@@ -33,10 +32,11 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
   │  stage/  │ ──────▶ │  stage/  │ ───────────▶ │  stage/  │──┘
   │   asr    │         │   llm    │              │   tts    │
   └──────────┘         └──────────┘              └──────────┘
-   SenseVoice          Mi:dm 2.0 Mini             Matcha-TTS (ko)
-   (int8)                 (2.3B, Q4)
-   (또는 stage/asr_stream: 말하는 동안 실시간 인식 — 아래 "알려진 제약" 참고)
+   SenseVoice (int8)    Mi:dm 2.0 Mini (Q4)       Matcha-TTS (ko)
 ```
+
+ASR 자리에는 `stage/asr_stream`(말하는 동안 실시간 인식)도 들어갈 수 있다 — 다만 지금은 실사용
+발화에서 동작하지 않는다(아래 "알려진 제약").
 
 핵심 두 가지:
 
@@ -129,8 +129,9 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav   # 1회
 ### 4. 모델 스왑
 
 ```bash
+# 코드 수정 없이 기본값을 세션 단위로 갈아끼운다 (아래 표의 기본값 → 더 작은 LLM으로)
 uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
-    --asr sense-voice-small --llm qwen3-0.6b-gguf --tts sherpa-matcha-ko
+    --llm qwen3-0.6b-gguf
 ```
 
 | 스테이지 | 기본값 | 다른 프리셋 |
@@ -141,7 +142,8 @@ uv run python scripts/run_pipeline.py --wav-in in.wav --wav-out out.wav \
 
 \* 비상업 라이선스 — 성능 참고용. LLM 선정 근거와 라이선스 분석은
 [`docs/llm-conversational-selection.md`](docs/llm-conversational-selection.md),
-모델 비교는 `scripts/_ab_persona.py`(페르소나 준수 + 대화 지속성 + 레이턴시).
+모델 비교는 `scripts/_ab_persona.py`(페르소나 준수 + 대화 지속성 + 멀티턴 문맥/반복/드리프트
++ 레이턴시).
 
 프리셋은 `configs/models.yaml`, 목소리는 `configs/voices.yaml`(목소리는 별도 축이 아니라 TTS
 스테이지의 파라미터라 따로 관리). 새 모델을 붙이는 절차는 `docs/FEATURES.md`의
@@ -156,28 +158,18 @@ sqlite3 data/conversations.db "SELECT turn_index, user_text, reply_text, asr_ms,
 ### 6. 테스트
 
 ```bash
-uv run pytest                      # 146개, 3초 미만
+uv run pytest        # 146개, 3초 미만  (윈도우: .venv-win\Scripts\python.exe -m pytest)
 ```
 
-```powershell
-.venv-win\Scripts\python.exe -m pytest
-```
+**가중치도 오디오 장치도 필요 없다** — 순수 로직(턴 컨트롤러 상태기계, VAD 링버퍼, 문장 청커,
+기억 파싱/consolidation, storage 쿼리, 스레드 예산)만 대상이다. 이 제약이 핵심이다: 가중치가
+필요한 스위트는 결국 아무도 안 돌린다.
 
-**모델 가중치도 오디오 장치도 필요 없다** — 순수 로직(턴 컨트롤러 상태기계, VAD 링버퍼,
-문장 청커, 기억 파싱/consolidation, storage 쿼리, 스레드 예산)만 대상이기 때문이다.
-이 제약이 핵심이다: 가중치가 필요한 스위트는 결국 아무도 안 돌린다.
+보증 범위는 **"코드가 명세대로 동작한다"까지**다. 대화가 자연스러운지, 끼어들기가 즉각적인지는
+여기서 안 나온다 — [사람 검증 체크리스트](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료) 참고.
 
-무엇을 보증하고 무엇을 **보증하지 않는지** 헷갈리면 안 된다 — 이건 "코드가 명세대로 동작한다"
-까지다. 대화가 자연스러운지, 끼어들기가 즉각적인지는 여기서 안 나온다
-([`docs/FEATURES.md`의 사람 검증 체크리스트](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료)).
-
-모델·장치가 필요한 검증은 별도 스모크 스크립트다:
-
-```bash
-uv run python scripts/_smoke_imports.py   # 의존성만 (CI 가능)
-uv run python scripts/_smoke_turn.py      # 모델 가중치 필요
-uv run python scripts/_smoke_duplex.py    # 실제 스피커+마이크 필요
-```
+가중치·장치가 필요한 검증은 스모크 스크립트가 따로 있다: `_smoke_imports.py`(의존성만, CI 가능),
+`_smoke_turn.py`(가중치), `_smoke_duplex.py`(실제 스피커+마이크).
 
 ## 프로젝트 구조
 
