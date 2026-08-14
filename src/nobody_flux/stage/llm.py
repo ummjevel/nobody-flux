@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from typing import Iterator
 
 from ..paths import PROJECT_ROOT
@@ -168,7 +168,7 @@ class NobodyLLM:
         max_history_turns), worth revisiting in the deferred on-device pass.
         """
         import torch
-        from transformers import TextIteratorStreamer
+        from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
 
         prompt = self._build_prompt(user_text)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -176,6 +176,18 @@ class NobodyLLM:
         streamer = TextIteratorStreamer(
             self.tokenizer, skip_prompt=True, skip_special_tokens=True
         )
+
+        # Cooperative stop for the worker below. Without it, a caller that
+        # close()s this generator mid-stream (barge-in) abandoned the worker
+        # thread with generate() still decoding toward max_new_tokens -- one
+        # leaked, CPU-burning thread per interruption, competing with the next
+        # turn's ASR and TTS (code-review #11).
+        stop = Event()
+
+        class _StopOnEvent(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs) -> bool:
+                return stop.is_set()
+
         gen_kwargs = dict(
             **inputs,
             max_new_tokens=self.max_new_tokens,
@@ -187,6 +199,7 @@ class NobodyLLM:
             top_p=0.9,
             pad_token_id=self.tokenizer.eos_token_id,
             streamer=streamer,
+            stopping_criteria=StoppingCriteriaList([_StopOnEvent()]),
         )
 
         # generate() runs on a worker thread so this generator can yield the
@@ -200,11 +213,20 @@ class NobodyLLM:
         thread.start()
 
         pieces: list[str] = []
-        for text in streamer:
-            pieces.append(text)
-            yield text
-        thread.join()
+        try:
+            for text in streamer:
+                pieces.append(text)
+                yield text
+        finally:
+            # Runs on normal exhaustion AND on GeneratorExit. Setting the event
+            # after a completed stream is a no-op; after a close() it is what
+            # stops generate() at its next step so join() returns promptly.
+            stop.set()
+            thread.join()
 
+        # Only reached when the stream was fully consumed -- an interrupted
+        # reply the user never heard stays out of the history (see
+        # pipeline.run_streaming's cancellation comment).
         self._remember(user_text, "".join(pieces).strip())
 
     def generate_raw(
@@ -303,6 +325,10 @@ class NobodyLLMGguf:
     # template rejects them.
     template_kwargs: dict = field(default_factory=lambda: {"enable_thinking": False})
     n_ctx: int = 4096
+    # Class default suits the multi-core dev boxes. Built through registry.py,
+    # this is normally *overridden* by configs/runtime.yaml's CPU budget
+    # (llm fraction 0.75, cap 8), which is what keeps the 4-core CM4 from
+    # thrashing -- see code-review #9. Only direct construction sees this 8.
     n_threads: int = 8
     # 0 = CPU only (default, works everywhere incl. CM4). On Apple Silicon set
     # to -1 (offload all layers) to use Metal via llama.cpp's Metal backend --
@@ -431,7 +457,15 @@ class NobodyLLMGguf:
     def reply_stream(self, user_text: str) -> Iterator[str]:
         """Streaming counterpart of reply() -- yields text pieces as llama.cpp
         decodes them. Same history bookkeeping, updated once after the stream
-        ends. See NobodyLLM.reply_stream for the shared rationale."""
+        ends. See NobodyLLM.reply_stream for the shared rationale.
+
+        Unlike the transformers path there is no worker thread to stop:
+        create_completion(stream=True) decodes lazily on the calling thread,
+        so close()ing this generator simply stops pulling. The KV cache is
+        left holding the partial sequence, which is safe for warm_up()'s
+        prefix-cache assumption -- llama.cpp reuses cache by longest common
+        prefix, and the next turn's prompt shares the static persona prefix
+        regardless of where the previous decode stopped."""
         prompt = self._build_prompt(user_text)
 
         stream = self._llm.create_completion(
