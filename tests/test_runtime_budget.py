@@ -34,6 +34,15 @@ def test_unbudgeted_stage_returns_none():
     assert registry.stage_threads("vad") is None
 
 
+def test_env_override_simulates_a_smaller_machine(monkeypatch):
+    # The point of the override: measure CM4-like thread counts from the dev
+    # box without editing a tracked config mid-run.
+    monkeypatch.setattr(registry.os, "cpu_count", lambda: 28)
+    monkeypatch.setenv("NOBODY_CPU_BUDGET", "4")
+    assert registry.stage_threads("llm") == 3
+    assert registry.stage_threads("tts") == 1
+
+
 def test_injection_fills_only_missing_thread_params(monkeypatch):
     monkeypatch.setattr(registry.os, "cpu_count", lambda: 4)
 

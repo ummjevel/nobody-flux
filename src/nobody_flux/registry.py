@@ -77,6 +77,14 @@ def stage_threads(stage: str) -> int | None:
     added up to ~14 threads on the 4-core CM4 target (code-review #9). A
     preset that sets n_threads explicitly in models.yaml still wins -- see
     _build; this is the *derived default*, not an override.
+
+    NOBODY_CPU_BUDGET overrides the yaml's cpu_budget for one process. That
+    exists to answer "what will the 4-core CM4 see" from a dev box --
+    `NOBODY_CPU_BUDGET=4 python scripts/_ab_persona.py` -- without editing a
+    tracked config mid-measurement. It bounds thread counts only: core count
+    is one of several things that differ from the real board (ISA, clock,
+    memory bandwidth), so treat the result as an upper bound on CM4 speed,
+    not a prediction of it.
     """
     if not RUNTIME_CONFIG_PATH.exists():
         return None
@@ -84,7 +92,10 @@ def stage_threads(stage: str) -> int | None:
     entry = (config.get("stages") or {}).get(stage)
     if entry is None:
         return None
-    budget = config.get("cpu_budget") or os.cpu_count() or 4
+    override = os.environ.get("NOBODY_CPU_BUDGET")
+    budget = (
+        int(override) if override else config.get("cpu_budget") or os.cpu_count() or 4
+    )
     threads = max(1, int(budget * float(entry.get("fraction", 1.0))))
     cap = entry.get("cap")
     if cap is not None:
