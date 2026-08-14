@@ -22,6 +22,14 @@ dependencies = [
     "transformers==4.57.1",
 ]
 
+[tool.pytest.ini_options]
+# Pure-logic tests only: no model weights, no audio device, whole suite in
+# seconds. That constraint is deliberate (docs/code-review-20260814.md) -- a
+# suite that needs weights stops getting run. Weights-dependent checks stay in
+# scripts/_smoke_turn.py; device-dependent ones in scripts/_smoke_duplex.py.
+testpaths = ["tests"]
+addopts = "-q"
+
 [tool.uv]
 # This project (and MOSS-TTS-Nano's isolated venv under external/) live on a
 # drvfs mount (/mnt/c/...) under WSL2. uv's default hardlink-from-cache install
@@ -29,3 +37,8 @@ dependencies = [
 # torch imported fine but crashed on missing libcudnn.so.9/libnccl.so.2 despite
 # their dist-info claiming they were installed. `copy` is slower but correct.
 link-mode = "copy"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

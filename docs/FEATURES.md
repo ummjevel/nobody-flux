@@ -142,7 +142,9 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
   - **이중 엔드포인팅**: recognizer 자체 엔드포인트(디코더 상태 기반)와 TEN-VAD(음향 에너지 기반)가
     둘 다 돌고, 어느 쪽이 턴을 끝낼지는 `turn/controller.py`가 정한다. 둘은 유용하게 어긋난다 —
     TEN-VAD는 숨소리를 발화로 보고, 디코더는 단어 중간 멈춤을 붙들고 있는다.
-- **`scripts/run_pipeline.py`**: 1회성 wav-in/wav-out CLI. 자동화 테스트·프리셋 결정론적 비교용.
+- **`scripts/run_pipeline.py`**: 1회성 wav-in/wav-out CLI. 수동 프리셋 비교·디버깅용 —
+  assert도 골든 출력도 없고 LLM 샘플링 때문에 비결정적이므로 자동화 테스트가 아니다
+  (그건 `tests/`와 스모크 스크립트의 몫).
 
 ## 저장 & 기억(개인화)
 
@@ -156,8 +158,9 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 ## 벤치마크 (`scripts/benchmark.py`)
 
 고정 테스트셋(`--wav-dir`, 커밋 안 됨)을 ASR×LLM×TTS 프리셋 조합마다 돌려 스테이지별 평균 latency
-표 출력. `--asr/--llm/--tts`로 좁히기, `--verbose`로 transcript도 출력(품질은 사람이 판단). ASR·LLM·TTS
-프리셋 전반에 동작 검증됨.
+표 출력. `--asr/--llm/--tts`로 좁히기, `--verbose`로 transcript도 출력(품질은 사람이 판단).
+프리셋 전반 동작은 과거에 수동으로 확인한 것 — 지속 보증이 아니므로 프리셋이 깨지면 다음
+수동 실행 전까지는 모른다.
 
 ## 환경 세팅
 
@@ -184,8 +187,9 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | 자기 자신에게 barge-in 안 함 | **실측** | `_smoke_duplex.py` — 단, 이 셋업(헤드폰)은 에코가 거의 없어 AEC 자체는 미검증 |
 | Phase 3 배선(파이프라인) | **실측** | `_smoke_turn.py` — 깨끗한 테스트 wav로 배치와 유사도 1.00 |
 | Phase 3 **실사용 정확도** | **실패** | 실제 마이크 발화를 못 읽음 — 아래 참고 |
+| 순수 로직 단위 테스트 | **있음** (114개, <2s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
 | `barge_in_confirm_ms` (250) | 추정치 | 실제 맞장구/끼어들기 발화 녹음 필요 (`_calibrate_turn_params.py`) |
-| `BACKCHANNEL_MAX_DURATION_S` | 추정치 | 위와 같음 |
+| `BACKCHANNEL_MAX_DURATION_S` | 추정치 | 위와 같음 — 단, 게이트에 들어가는 duration이 pre-roll 제외한 실발화 길이(`speech_duration_s`)라는 것 자체는 회귀 테스트로 고정(2026-08-14 전까지는 pre-roll 포함 길이가 들어가 게이트가 죽은 코드였다) |
 | `streaming_asr.yaml: rule2_*` | 추정치 | 실제 발화로 확인 필요 |
 | 대화 전체 루프(사람이 말하는) | **미검증** | 사람의 발화가 필요 — 아래 "다음 단계" |
 

@@ -290,14 +290,18 @@ def check_turn_controller(audio: np.ndarray, with_transcriber: bool = False) -> 
         )
         return False
 
-    # Lower bound: the pre-roll only ever adds, so anything much under the
-    # speech itself means the front of the turn was lost. Upper bound: room tone
-    # being swept in inflates every downstream duration check, the backchannel
-    # classifier's included. The 1.5s of headroom is pre-roll (0.3s) plus the
-    # model's measured let-go lag at the calibrated threshold (~0.8s).
-    if not (speech_s * 0.9 <= turn.duration_s <= speech_s + 1.5):
+    # Checked against speech_duration_s, not the buffer length: the buffer
+    # includes pre_roll_ms of padding, and slack wide enough to absorb it is
+    # exactly how the 300->500ms pre-roll growth silently killed the
+    # backchannel gate (docs/code-review-20260814.md #1). Lower bound: much
+    # under the speech itself means the front of the turn was lost. Upper
+    # bound: the model's measured let-go lag at the calibrated threshold
+    # (~0.8s) -- room tone swept in past that inflates every downstream
+    # duration decision.
+    if not (speech_s * 0.9 <= turn.speech_duration_s <= speech_s + 1.0):
         print(
-            f"  FAIL captured duration {turn.duration_s:.2f}s is implausible for "
+            f"  FAIL speech duration {turn.speech_duration_s:.2f}s "
+            f"(buffer {turn.duration_s:.2f}s) is implausible for "
             f"{speech_s:.2f}s of speech"
         )
         return False
@@ -305,6 +309,14 @@ def check_turn_controller(audio: np.ndarray, with_transcriber: bool = False) -> 
 
 
 def main() -> int:
+    results: list[tuple[str, bool]] = []
+
+    # Model-free check first, so a missing wav (below) can never mask a pure
+    # logic failure. The same cases also run in tests/test_small_pure.py --
+    # kept here too so this script remains a self-contained smoke pass.
+    print("\n[1/4] LocalAgreement prefix stabilization")
+    results.append(("local-agreement", check_local_agreement()))
+
     if not TEST_WAV.exists():
         raise SystemExit(
             f"Missing {TEST_WAV}. Run the setup script for your platform first "
@@ -312,10 +324,6 @@ def main() -> int:
         )
 
     audio = load_test_audio()
-    results: list[tuple[str, bool]] = []
-
-    print("\n[1/4] LocalAgreement prefix stabilization")
-    results.append(("local-agreement", check_local_agreement()))
 
     print("\n[2/4] Streaming ASR (Phase 3)")
     results.append(("streaming-asr", check_streaming_asr(audio)))

@@ -102,6 +102,63 @@ def longest_common_prefix(texts: list[str]) -> str:
 
 
 @dataclass
+class LocalAgreementStabilizer:
+    """The LocalAgreement state machine, model-free.
+
+    Extracted from ``StreamingTranscriber`` so the commit/monotonicity rules
+    can be unit-tested on plain strings -- no recognizer, no weights, no audio.
+    ``StreamingTranscriber`` owns one and feeds it every decoder hypothesis.
+    """
+
+    agreement_n: int = 2
+    _recent: list[str] = field(init=False, repr=False, default_factory=list)
+    _committed: str = field(init=False, repr=False, default="")
+
+    def reset(self) -> None:
+        self._recent = []
+        self._committed = ""
+
+    def observe(self, hypothesis: str) -> None:
+        """Record one hypothesis and recompute the committed prefix.
+
+        This is the LocalAgreement rule itself: retain the last ``agreement_n``
+        hypotheses, commit their longest common prefix.
+        """
+        self._recent.append(hypothesis)
+        if len(self._recent) > self.agreement_n:
+            # Drop from the front rather than using a deque: agreement_n is 2 or
+            # 3, so the list operation is trivially cheap and keeps the
+            # committed-prefix computation a plain slice over a list.
+            del self._recent[0]
+
+        if len(self._recent) < self.agreement_n:
+            # Not enough evidence yet -- nothing has had the chance to be
+            # confirmed by a second observation, so commit nothing.
+            return
+
+        agreed = longest_common_prefix(self._recent)
+        # Monotonic guard. The committed prefix must never shrink: a consumer
+        # that has already acted on committed text cannot un-act on it. If a
+        # later agreement is somehow shorter (a mid-utterance decoder reset, a
+        # hypothesis that dropped a leading token), keep what was already
+        # promised rather than retracting it.
+        if len(agreed) > len(self._committed):
+            self._committed = agreed
+
+    def force_commit(self, text: str) -> None:
+        """Everything is settled (finalize) -- the full text becomes committed."""
+        self._committed = text
+
+    @property
+    def committed(self) -> str:
+        return self._committed
+
+    @property
+    def hypothesis(self) -> str:
+        return self._recent[-1] if self._recent else ""
+
+
+@dataclass
 class StreamingTranscriber:
     """Live incremental Korean recognition over a frame stream.
 
@@ -162,11 +219,11 @@ class StreamingTranscriber:
     # -- Internal state ----------------------------------------------------
     _recognizer: object = field(init=False, repr=False, default=None)
     _stream: object = field(init=False, repr=False, default=None)
-    _recent: list[str] = field(init=False, repr=False, default_factory=list)
-    _committed: str = field(init=False, repr=False, default="")
+    _stabilizer: LocalAgreementStabilizer = field(init=False, repr=False, default=None)
     _endpoint: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
+        self._stabilizer = LocalAgreementStabilizer(agreement_n=self.agreement_n)
         suffix = ".int8.onnx" if self.use_int8 else ".onnx"
         # sample_rate/feature_dim are this checkpoint's training configuration,
         # not tunable parameters -- changing either produces silent garbage
@@ -200,8 +257,7 @@ class StreamingTranscriber:
         hard to trace back.
         """
         self._stream = self._recognizer.create_stream()
-        self._recent = []
-        self._committed = ""
+        self._stabilizer.reset()
         self._endpoint = False
 
     # -- feeding ----------------------------------------------------------
@@ -233,34 +289,7 @@ class StreamingTranscriber:
         if self.enable_endpoint_detection and self._recognizer.is_endpoint(self._stream):
             self._endpoint = True
 
-        self._observe(self._recognizer.get_result(self._stream))
-
-    def _observe(self, hypothesis: str) -> None:
-        """Record one hypothesis and recompute the committed prefix.
-
-        This is the LocalAgreement rule itself: retain the last ``agreement_n``
-        hypotheses, commit their longest common prefix.
-        """
-        self._recent.append(hypothesis)
-        if len(self._recent) > self.agreement_n:
-            # Drop from the front rather than using a deque: agreement_n is 2 or
-            # 3, so the list operation is trivially cheap and keeps the
-            # committed-prefix computation a plain slice over a list.
-            del self._recent[0]
-
-        if len(self._recent) < self.agreement_n:
-            # Not enough evidence yet -- nothing has had the chance to be
-            # confirmed by a second observation, so commit nothing.
-            return
-
-        agreed = longest_common_prefix(self._recent)
-        # Monotonic guard. The committed prefix must never shrink: a consumer
-        # that has already acted on committed text cannot un-act on it. If a
-        # later agreement is somehow shorter (a mid-utterance decoder reset, a
-        # hypothesis that dropped a leading token), keep what was already
-        # promised rather than retracting it.
-        if len(agreed) > len(self._committed):
-            self._committed = agreed
+        self._stabilizer.observe(self._recognizer.get_result(self._stream))
 
     # -- reading ----------------------------------------------------------
 
@@ -269,14 +298,14 @@ class StreamingTranscriber:
         """Stabilized prefix -- agreed on by ``agreement_n`` hypotheses, and
         guaranteed never to shrink. This is the text that is safe to act on
         mid-utterance."""
-        return self._committed
+        return self._stabilizer.committed
 
     @property
     def hypothesis(self) -> str:
         """The decoder's full current guess, committed prefix included. Safe to
         display as a live caption; not safe to act on, since the uncommitted
         tail may still be revised."""
-        return self._recent[-1] if self._recent else ""
+        return self._stabilizer.hypothesis
 
     @property
     def endpoint_detected(self) -> bool:
@@ -304,7 +333,7 @@ class StreamingTranscriber:
         text = self._recognizer.get_result(self._stream)
         # Everything is settled now, so the full text becomes committed --
         # there is no longer any uncommitted tail to be revised.
-        self._committed = text
+        self._stabilizer.force_commit(text)
         return " ".join(text.split())
 
     # -- offline convenience ----------------------------------------------
