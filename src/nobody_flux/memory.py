@@ -62,6 +62,16 @@ VALID_CATEGORIES = frozenset({"identity", "interest", "recurring_topic", "prefer
 MAX_KEY_CHARS = 30
 MAX_VALUE_CHARS = 60
 
+# How many stored memories consolidation may show the model at once.
+#
+# This cap is what breaks a self-reinforcing loop (code-review #6). The list
+# used to be the whole table, and _parse_operations only accepts exactly one
+# well-formed op per candidate, in order. So more rows -> longer prompt ->
+# less chance a 2.3B emits an aligned array -> fall back to all-ADD -> more
+# rows. The mechanism meant to keep the table small failed first, and worst,
+# on the tables that most needed it.
+MAX_CONSOLIDATION_EXISTING = 30
+
 
 def _sanitize_field(text: str, max_chars: int) -> str:
     """Collapse whitespace/newlines and cap length. Newlines matter most: a
@@ -353,6 +363,66 @@ def _parse_operations(raw_text: str, n_candidates: int, n_existing: int) -> list
     return ops
 
 
+def _resolve_exact_matches(
+    existing: list[dict], candidates: list[dict]
+) -> tuple[dict[int, dict], list[tuple[int, dict]]]:
+    """Split candidates into the ones decidable without the model and the rest.
+
+    A returning user restates the facts they already told us, so most
+    candidates arrive under a (category, key) that is already stored -- and
+    for those the decision is mechanical: an identical value is a NOOP, a
+    changed one is an UPDATE of that row. Settling them here means they can
+    neither be misparsed nor thrown out of alignment by a neighbouring op,
+    and it leaves the model only the case its judgement was ever needed for:
+    the same fact worded under a different key ("취미: 등산" vs "관심사: 산").
+
+    Both sides are already unique per (category, key) -- candidates via
+    _dedupe_memories, existing via memories_for_consolidation's window
+    function -- so a dict keyed on that pair cannot silently drop a row.
+
+    Returns ({candidate index: resolved op}, [(index, candidate) still open]).
+    """
+    by_key = {(m.get("category"), m["key"]): m for m in existing}
+    resolved: dict[int, dict] = {}
+    remaining: list[tuple[int, dict]] = []
+    for index, candidate in enumerate(candidates):
+        match = by_key.get((candidate.get("category"), candidate["key"]))
+        if match is None:
+            remaining.append((index, candidate))
+        elif str(match["value"]).strip() == str(candidate["value"]).strip():
+            resolved[index] = {"op": "NOOP"}
+        else:
+            resolved[index] = {
+                "op": "UPDATE",
+                "target_id": match["id"],
+                "memory": candidate,
+            }
+    return resolved, remaining
+
+
+def _relevant_existing(
+    existing: list[dict], candidates: list[dict], limit: int | None = None
+) -> list[dict]:
+    """The slice of stored memories worth putting in the prompt, capped.
+
+    Rows sharing a category with some candidate go first: the duplicate the
+    model is here to catch is a same-fact-different-key one, and those are
+    almost always same-category. Everything else fills the remaining space,
+    so a small table still shows in full and a large one shows the part that
+    could plausibly match.
+
+    The cap is read here rather than defaulted in the signature, so that a
+    default argument bound at import time cannot outrank the module constant.
+    """
+    limit = MAX_CONSOLIDATION_EXISTING if limit is None else limit
+    if len(existing) <= limit:
+        return existing
+    wanted = {c.get("category") for c in candidates}
+    same = [m for m in existing if m.get("category") in wanted]
+    others = [m for m in existing if m.get("category") not in wanted]
+    return (same + others)[:limit]
+
+
 def consolidate_memories(llm, existing: list[dict], candidates: list[dict]) -> list[dict]:
     """Decide, per candidate fact, whether to ADD / UPDATE an existing memory
     / NOOP -- Mem0-style, but with a hard fallback for the 0.6B reliability
@@ -368,45 +438,60 @@ def consolidate_memories(llm, existing: list[dict], candidates: list[dict]) -> l
       {"op": "NOOP"}
 
     Shortcuts without spending an LLM call: no candidates -> []; no existing
-    memories -> every candidate is an ADD (nothing to consolidate against).
-    Otherwise one generate_raw call; if its output is unusable
-    (_parse_operations returns None), every candidate falls back to ADD --
-    identical to the pre-consolidation behavior, so consolidation can only
-    help, never regress.
+    memories -> every candidate is an ADD (nothing to consolidate against);
+    every candidate settled by exact (category, key) match -> no call needed.
+
+    What the model still gets asked is bounded on both sides -- only the
+    candidates exact matching left open, against at most
+    MAX_CONSOLIDATION_EXISTING stored rows -- so prompt length no longer
+    tracks table size (code-review #6). If its output is unusable
+    (_parse_operations returns None), only those remaining candidates fall
+    back to ADD; the exact matches keep their decisions, so a parse failure
+    can no longer undo the consolidation that did work.
     """
     if not candidates:
         return []
     if not existing:
         return [{"op": "ADD", "memory": c} for c in candidates]
 
+    resolved, remaining = _resolve_exact_matches(existing, candidates)
+    if not remaining:
+        return [resolved[i] for i in range(len(candidates))]
+
+    open_candidates = [c for _, c in remaining]
+    # The model's "UPDATE N" indexes this list, not the full table -- the two
+    # differ once the cap bites, and reading N against the wrong list would
+    # rewrite an unrelated memory.
+    visible = _relevant_existing(existing, open_candidates)
     prompt = (
-        _format_memory_list("기존 기억", existing)
+        _format_memory_list("기존 기억", visible)
         + "\n"
-        + _format_memory_list("새 사실", candidates)
+        + _format_memory_list("새 사실", open_candidates)
     )
     raw_text = llm.generate_raw(CONSOLIDATION_SYSTEM_PROMPT, prompt, max_new_tokens=256)
-    ops = _parse_operations(raw_text, len(candidates), len(existing))
+    ops = _parse_operations(raw_text, len(open_candidates), len(visible))
     if ops is None:
         # Loudly, not silently: without this line the added/updated/skipped
         # counts talk.py logs are indistinguishable between "consolidation
         # worked" and "consolidation collapsed to all-ADD".
         logger.warning(
-            f"[memory] consolidation output unusable — falling back to ADD for all "
-            f"{len(candidates)} candidate(s)"
+            f"[memory] consolidation output unusable — falling back to ADD for "
+            f"{len(open_candidates)} of {len(candidates)} candidate(s)"
         )
-        return [{"op": "ADD", "memory": c} for c in candidates]
+        ops = [{"op": "ADD"}] * len(open_candidates)
 
-    resolved: list[dict] = []
-    for candidate, op in zip(candidates, ops):
+    for (index, candidate), op in zip(remaining, ops):
         if op["op"] == "UPDATE":
-            resolved.append(
-                {"op": "UPDATE", "target_id": existing[op["target"]]["id"], "memory": candidate}
-            )
+            resolved[index] = {
+                "op": "UPDATE",
+                "target_id": visible[op["target"]]["id"],
+                "memory": candidate,
+            }
         elif op["op"] == "NOOP":
-            resolved.append({"op": "NOOP"})
+            resolved[index] = {"op": "NOOP"}
         else:
-            resolved.append({"op": "ADD", "memory": candidate})
-    return resolved
+            resolved[index] = {"op": "ADD", "memory": candidate}
+    return [resolved[i] for i in range(len(candidates))]
 
 
 def format_recall_block(memories: list[tuple]) -> str:

@@ -303,6 +303,76 @@ def test_consolidate_update_reaches_the_right_target_id():
     assert ops[1] == {"op": "NOOP"}
 
 
+def test_consolidate_exact_key_match_needs_no_llm_call():
+    """A returning user restating stored facts is the common case, and it is
+    decidable in code: same value -> NOOP, changed value -> UPDATE that row
+    (#6). Spending a generation call on it was what made the prompt grow."""
+    existing = [
+        {"id": 7, "category": "identity", "key": "이름", "value": "지수", "confidence": 0.9},
+        {"id": 3, "category": "context", "key": "사는 곳", "value": "서울", "confidence": 0.8},
+    ]
+    candidates = [
+        {"category": "identity", "key": "이름", "value": "지수", "confidence": 0.9},
+        {"category": "context", "key": "사는 곳", "value": "부산", "confidence": 0.7},
+    ]
+    llm = FakeLLM("이런 건 대답 못 해")
+    ops = consolidate_memories(llm, existing=existing, candidates=candidates)
+    assert ops[0] == {"op": "NOOP"}
+    assert ops[1] == {"op": "UPDATE", "target_id": 3, "memory": candidates[1]}
+    assert llm.calls == []
+
+
+def test_consolidate_unusable_output_keeps_the_exact_matches():
+    """A parse failure may only degrade what the model was actually asked
+    about. Before #6 it discarded every decision and re-added everything,
+    which is what grew the table that broke the parse in the first place."""
+    existing = [{"id": 7, "category": "identity", "key": "이름", "value": "지수"}]
+    candidates = [
+        {"category": "identity", "key": "이름", "value": "지수", "confidence": 0.9},
+        {"category": "interest", "key": "취미", "value": "등산", "confidence": 0.5},
+    ]
+    llm = FakeLLM("응 알겠어!")
+    ops = consolidate_memories(llm, existing=existing, candidates=candidates)
+    assert ops[0] == {"op": "NOOP"}                       # settled without the model
+    assert ops[1] == {"op": "ADD", "memory": candidates[1]}
+
+
+def test_consolidate_caps_what_the_prompt_shows(monkeypatch):
+    """Prompt size must stop tracking table size -- that coupling is the
+    degradation loop. Same-category rows are the ones kept."""
+    monkeypatch.setattr("src.nobody_flux.memory.MAX_CONSOLIDATION_EXISTING", 5)
+    existing = (
+        [{"id": i, "category": "context", "key": f"기타{i}", "value": "v"} for i in range(50)]
+        + [{"id": 900, "category": "interest", "key": "산", "value": "등산 좋아함"}]
+    )
+    llm = FakeLLM('[{"op": "NOOP"}]')
+    candidates = [{"category": "interest", "key": "취미", "value": "등산", "confidence": 0.5}]
+
+    consolidate_memories(llm, existing=existing, candidates=candidates)
+
+    _system, user_text = llm.calls[0]
+    assert "등산 좋아함" in user_text          # the plausible match survived the cap
+    assert user_text.count("기타") == 4        # and the rest was truncated to fit
+
+
+def test_consolidate_update_target_indexes_the_shown_list_not_the_table(monkeypatch):
+    """With the cap on, "UPDATE 0" means the first row the model was SHOWN.
+    Resolving it against the full table would rewrite an unrelated memory."""
+    monkeypatch.setattr("src.nobody_flux.memory.MAX_CONSOLIDATION_EXISTING", 2)
+    existing = [
+        {"id": 100, "category": "context", "key": "직장", "value": "서울"},
+        {"id": 101, "category": "context", "key": "출퇴근", "value": "지하철"},
+        {"id": 102, "category": "interest", "key": "산", "value": "등산"},
+    ]
+    llm = FakeLLM('[{"op": "UPDATE", "target": 0}]')
+    candidates = [{"category": "interest", "key": "취미", "value": "클라이밍", "confidence": 0.5}]
+
+    ops = consolidate_memories(llm, existing=existing, candidates=candidates)
+
+    # Shown list is [interest/산, then a context filler]; target 0 is id 102.
+    assert ops[0]["target_id"] == 102
+
+
 # -- format_recall_block -----------------------------------------------------------
 
 
