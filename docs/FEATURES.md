@@ -112,7 +112,10 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
   `--aec` 켜면 `--no-barge-in` 불필요). 백엔드: `refgate`(무의존 억제 게이트) / `speex`(진짜 AEC,
   `speexdsp` 필요) / `os`(Linux/CM4 module-echo-cancel) / `vpio`(macOS, 네이티브 바인딩 미구현—hook) /
   `auto`(플랫폼·라이브러리 자동선택, `configs/audio.yaml`). 지연 정렬은 `scripts/_calibrate_aec_delay.py`로
-  실측해 `delay_frames`에 기록(윈도우 박스 실측: 28ms = 1프레임).
+  실측해 `delay_ms`에 기록(윈도우 박스 실측: 28ms). 참조 신호는 샘플 단위로 지연시킨다 —
+  30ms 프레임 단위로 양자화하던 시절엔 ±15ms 오차만으로 파형 상관이 0 근처가 돼
+  `corr_threshold`를 어떤 값으로도 튜닝할 수 없었다(code-review #5). `delay_frames`는
+  옛 설정을 위한 폴백으로만 남아 있다.
   - **디바이스 샘플레이트 협상**: 내부 계약은 16kHz 그대로 두되 스트림은 기기가 여는 레이트로 연다.
     WASAPI 공유 모드는 윈도우 믹스 포맷 레이트(측정 박스는 48kHz)로만 열리므로 16kHz 고정 duplex는
     `Invalid sample rate [-9997]`로 실패 — 즉 **윈도우에서 `--aec` 경로가 아예 열리지 않았다**.
@@ -183,11 +186,11 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | 파라미터 | 상태 | 근거 |
 |---|---|---|
 | `vad.yaml: threshold` | **실측** (0.5) | `_calibrate_vad_threshold.py` — 이 방의 실제 노이즈 플로어 대상 |
-| `audio.yaml: delay_frames` | **실측** (1 = 28ms) | `_calibrate_aec_delay.py` 5회 중앙값 |
+| `audio.yaml: delay_ms` | **실측** (28ms) | `_calibrate_aec_delay.py` 5회 중앙값 — 이제 샘플 단위로 적용된다(#5) |
 | 자기 자신에게 barge-in 안 함 | **실측** | `_smoke_duplex.py` — 단, 이 셋업(헤드폰)은 에코가 거의 없어 AEC 자체는 미검증 |
 | Phase 3 배선(파이프라인) | **실측** | `_smoke_turn.py` — 깨끗한 테스트 wav로 배치와 유사도 1.00 |
 | Phase 3 **실사용 정확도** | **실패** | 실제 마이크 발화를 못 읽음 — 아래 참고 |
-| 순수 로직 단위 테스트 | **있음** (114개, <2s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
+| 순수 로직 단위 테스트 | **있음** (141개, <3s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, 스레드 예산, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
 | `barge_in_confirm_ms` (250) | 추정치 | 실제 맞장구/끼어들기 발화 녹음 필요 (`_calibrate_turn_params.py`) |
 | `BACKCHANNEL_MAX_DURATION_S` | 추정치 | 위와 같음 — 단, 게이트에 들어가는 duration이 pre-roll 제외한 실발화 길이(`speech_duration_s`)라는 것 자체는 회귀 테스트로 고정(2026-08-14 전까지는 pre-roll 포함 길이가 들어가 게이트가 죽은 코드였다) |
 | `streaming_asr.yaml: rule2_*` | 추정치 | 실제 발화로 확인 필요 |
