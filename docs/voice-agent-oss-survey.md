@@ -95,7 +95,7 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 ## 3. 자가호스팅·온디바이스 비서 (CM4 배포 교과서)
 
 ### GLaDOS (dnhkng) — 우리 턴테이킹/barge-in 레퍼런스 · MIT
-- **아키텍처**: 저지연 대화 companion. **~600ms 왕복 목표.** 순환 오디오 버퍼 + **Silero VAD**(32ms
+- **아키텍처**: 저지연 대화 companion. **~600ms 왕복 목표** (⚠️ 2026-08-18: 저장소에 전체 시스템 레이턴시 실측이 **없다** — 저자의 목표 서술이고 달성된 측정치가 아니다). 순환 오디오 버퍼 + **Silero VAD**(32ms
   청크, prob>0.8, 800ms pre-roll, 640ms 종료 침묵). STT=Parakeet TDT(ONNX 스트리밍), TTS=Kokoro,
   LLM=OpenAI 호환(로컬 Ollama). **barge-in: 사용자 발화가 즉시 재생 중단 + 응답을 히스토리에서 잘라냄.**
 - **장점**: 오픈 중 최고 수준 turn-taking/interruptibility. 스트리밍 ASR + 문장 단위 TTS로 레이턴시↓.
@@ -110,7 +110,7 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 - **장점**: 깔끔한 프로토콜 분리, 온디바이스 wake-word 게이팅, 완전 로컬, 거대·건강한 커뮤니티.
   **Wyoming 프로토콜이 여기서 가장 채택할 만한 아이디어** — 오디오 장치↔추론 서비스 간 안정적 계약.
 - **단점**: Assist는 명령/인텐트 지향(대화형 companion 아님, LLM은 bolt-on). 분리 구조는 별도 상시
-  서버 가정. **Piper 한국어 음성 없음.**
+  서버 가정. **Piper 한국어 음성은 있으나 non-commercial** (`ko_KR-kss`, KSS 데이터셋 유래 CC-BY-NC-SA-4.0 — 2026-08-18 정정: "없다"가 아니라 "상업 이용 불가"다).
 - **우리가 얻어갈 것**: **Wyoming의 start/chunk/stop 스트리밍 이벤트를 내부 오디오 계약으로 채택** —
   올인원이어도. CM4가 약하면 satellite-server 분리로 탈출할 여지.
 

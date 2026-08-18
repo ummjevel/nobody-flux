@@ -193,6 +193,10 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | Phase 3 **실사용 정확도** (`engine: chunked-sensevoice`, 신규 기본) | **실측 — 정확도 OK** | 배치 대비 CER 0.000, 빈 결과 없음. 단 **스트리밍 이득은 없다**: 최초 커밋 1.29초, 16개 중 8개는 쓸 만한 걸 못 커밋 |
 | chunked 디코드 비용 | **실측** | 증폭 3.0x, wall RTF 0.21 (4코어 프록시). **CM4 미측정** — per-core가 느려 여유가 훨씬 작다 |
 | 커밋된 부분 전사를 믿을 수 있는가 | **실측 — 아니다** | 재디코드가 해석을 바꾼다: `"오늘 산책 코스 추천"` → `"오늘 산체코 추천해줘."` |
+| **CM4 타깃 판정** | **결론 — 사지 말 것** | A72는 Armv8.0-A로 dotprod·i8mm·FP16 산술이 없고, llama.cpp의 ARM 양자화 빠른 경로가 **전부** dotprod를 요구한다(GCC/LLVM 소스 확인). `ggml_vdotq_s32`가 NEON 6개로 에뮬레이션됨. 동일 실리콘(Pi 4) 실측 환산 → 45토큰 응답 **13~18초**, warm-up **130~230초**. → **CM5(A76, dotprod 있음)로 타깃 상향 권고.** `research-delta-20260818.md` §10 |
+| CM4에서 죽는 것 / 사는 것 | **실측** | **LLM만 죽는다.** Matcha-TTS는 Pi 4 실측 RTF 0.411@4T로 실시간. 단 우리 `runtime.yaml`이 TTS에 **1스레드**만 줘서 CM4 환산 RTF ≈1.13 → **스테이지 배분 재검토 필요**(설정 문제, 보드와 무관) |
+| 🚨 **기본 ASR 가중치 라이선스** | **미확인 → 확인됨, 문제 있음** | `models/sense-voice/LICENSE`가 링크 한 줄(`Ref to FunASR#license`). Apache/MIT 아님 — **FunASR Model Open Source License v1.1**(Alibaba). 비교용이 아니라 **기본값**이다. 제품화 전 법무 확인 |
+| Smart Turn ARM 추론 시간 | **미측정 — 예산에 없음** | 우리 전제는 "CPU ~12ms"지만 Graviton 1 vCPU에서 **159ms** 보고. VAD 침묵 뒤 실행이라 턴 지연에 그대로 더해진다 → CM4 측정 항목에 추가 |
 | LLM 프리필 비용 (턴당) | **실측** | 고정 ~117ms + 토큰당 ~11.6ms (3스레드, 약 86 tok/s). 정적 프리픽스 1144토큰은 `warm_up()`이 이미 지불 → 턴당 남는 건 발화 3~16토큰. 동일 프롬프트 재호출은 **4ms** |
 | 프리픽스 안정성 | **불변식** | ⚠️ 프롬프트 앞부분이 턴마다 바뀌면(시간 표시, 동적 메모리 위치 등) 위 4ms가 300ms로 돌아온다. 프리픽스를 안정적으로 유지하는 것이 진짜 레버다 |
 | 턴 판정 어휘 통합 (`turn/verdict.py`) | **있음** (동작 무변경, 등가성 테스트로 고정) | `FINISHED/UNFINISHED/WAIT/EMPTY`. vad.py·talk.py의 기존 조건과 1:1로 같음을 테스트로 증명 |

@@ -577,3 +577,282 @@ NGC의 **RIVA Conformer ASR Korean 파인튜닝**이고, 그 NGC 페이지는
 → **파생 모델의 HF 라이선스 태그는 원본 출처를 확인하기 전까지 1차 출처로 취급하지 말 것.**
 §7.2의 "번들 안 LICENSE가 MIT인데 가중치는 OpenRAIL-M"과 같은 계열의 함정이고,
 이번 주에 이 프로젝트가 만난 세 번째 라이선스 함정이다.
+
+---
+
+## 10. CM4 타당성 — **보드를 사지 말고 타깃을 CM5로 올려라**
+
+`docs/FEATURES.md`가 "보드를 구할지 타깃을 재검토할지는 결정 사항"으로 남겨둔 것을
+1차 출처로 종결한다. **결론: CM4를 사지 말 것.** 이유가 튜닝으로 회복 불가능한 ISA 결함이다.
+
+### 10.1 A72는 llama.cpp의 ARM 빠른 경로를 **전부** 못 쓴다
+
+| 코어 | 아키텍처 | dotprod | i8mm | FP16 산술 |
+|---|---|---|---|---|
+| **Cortex-A72 (CM4)** | **Armv8.0-A** | **없음** | **없음** | **없음** |
+| Cortex-A76 (CM5/Pi 5) | Armv8.2-A | **있음** | 없음 | 있음 |
+| Cortex-A720 (CIX P1) | Armv9.2-A | 있음 | **있음** | 있음 |
+
+[1차확인] GCC `aarch64-cores.def`: `AARCH64_CORE("cortex-a72", …, V8A, (CRC), …)` —
+Armv8.0 + CRC뿐. `cortex-a76`은 `V8_2A, (F16, RCPC, DOTPROD)`.
+LLVM `AArch64Processors.td`도 동일(`cortex-a72` → `HasV8_0aOps`, DotProd/MatMulInt8 없음).
+**i8mm은 어느 Cortex-A7x에도 없다** — i8mm을 원하면 Armv9.2급으로 가야 하고 그건 모듈 폼팩터 포기다.
+
+**결정적 [1차확인]** — `ggml/src/ggml-cpu/ggml-cpu-impl.h`:
+dotprod가 없으면 `ggml_vdotq_s32`가 **NEON 명령 6개로 에뮬레이션**된다(SDOT 1개 자리에
+`vmull_s8` 2 + `vpaddlq_s16` 2 + `vaddq_s32` 2). 이게 디코드 내부 루프의 실제 비용이다.
+
+그리고 우회로가 없다 [1차확인]:
+- `repack.cpp`의 커널 선택 **전체**가 `ggml_cpu_has_dotprod()` 게이트 안 → **NEON-only 분기가 아예 없다.**
+  대상 7종(Q4_0, Q4_K, Q5_K, Q6_K, IQ4_NL, MXFP4, Q8_0) 전부 해당. **IQ4_NL로 도망갈 수도 없다.**
+- `sgemm.cpp`의 `tinyBLAS_Q0_ARM` 클래스 전체가 `#if defined(__ARM_FEATURE_DOTPROD)` 안.
+- `quants.c`의 Q4_K 2-row 배치 경로는 `__ARM_FEATURE_MATMUL_INT8` 필요.
+
+**그 빠른 경로가 주는 실측 이득**[1차확인, llama.cpp PR #5780 / #10541]:
+Graviton3에서 Llama-2 7B Q4_0 1스레드 **프리필 2.57x / 디코드 2.12x**,
+M2에서 IQ4_NL repack **pp256 3.08x**.
+→ **A72는 프리필 약 2.5~3x, 디코드 1.3~2.1x를 구조적으로 잃는다** [추론].
+
+### 10.2 동일 실리콘 실측 — 두 자리 초 응답
+
+[2차, 방법 명시된 llama-bench] Pi 4 8GB, Gemma 4 E2B **Q4_K_M 2.88GiB**:
+`pp512 4.06 / tg128 1.68 t/s`. 같은 문서 Pi 5: `31.86 / 6.71`.
+→ **프리필 7.8x, 디코드 4.0x 차이.** 클럭비는 1.33x, Geekbench6 싱글코어비는 2.4~2.7x.
+**프리필에만 남는 ~3x 잔차가 곧 dotprod repack GEMM이다** [추론] — §10.1 소스 분석과 정확히 일치.
+
+문서 원문: Pi 4는 턴이 진행되며 프리필이 5.3→3.4 t/s로 **열화**하고 원인은
+*"memory bandwidth saturation as the KV cache grows"*. Pi 5엔 이 열화가 없다.
+
+**CM4 예측** [추론 — Pi 4B 1.8GHz 기준을 모델 크기 2.01x·클럭 0.83x로 환산]:
+
+| | CM4 (4×A72@1.5GHz, 4T) |
+|---|---|
+| 디코드 | **2.5~3.5 t/s** |
+| 프리필 | **5~9 t/s** (개발박스 86 → **12배 느림**) |
+| 세션 시작 warm-up 1144토큰 | **130~230초** |
+| 45토큰 응답(한글 ~40자) | **13~18초** |
+
+**대역폭도 이미 천장이다** [1차확인+추론]: Pi 4 tinymembench memcpy 2737 MB/s인데
+실측 디코드가 이미 ~5.2 GB/s 가중치 읽기 = 로프에 걸려 있다.
+RAM을 8GB로 늘려도, 스레드를 재배분해도 이건 안 움직인다.
+
+### 10.3 죽는 건 LLM 하나다 — 그리고 우리 스레드 예산이 TTS도 죽인다
+
+[1차확인] sherpa-onnx 공식 문서의 **Raspberry Pi 4 실측** Matcha RTF:
+`1T 0.941 / 2T 0.561 / 3T 0.451 / 4T 0.411`. **4스레드면 A72에서 실시간이다.**
+
+§7.4에서 "개발박스 RTF 0.37 vs Pi 4 0.411이 거의 같다"는 불일치가 있었는데 **풀렸다 —
+스레드 수가 달랐다.** 우리 측정은 `NOBODY_CPU_BUDGET=4`에서 `runtime.yaml`이
+tts에 **1스레드**만 주기 때문이다(fraction 0.25 × 4 = 1). 같은 조건으로 다시 재면:
+
+| | 1T | 2T | 3T | 4T |
+|---|---|---|---|---|
+| 우리 개발박스, matcha-ko | **0.268** | 0.203 | 0.191 | 0.178 |
+| Pi 4, matcha-en [1차확인] | **0.941** | 0.561 | 0.451 | 0.411 |
+
+→ **코어당 개발박스가 A72보다 3.5배 빠르다.** 4스레드 대비로는 2.3배.
+
+**그런데 여기서 새 문제가 나온다.** CM4(1.5GHz = Pi 4의 0.83x)에서
+**우리 파이프라인이 TTS에 주는 1스레드**면 RTF ≈ 0.941/0.83 = **1.13 — 실시간보다 느리다.**
+스트리밍 재생이 따라가지 못한다. Supertonic은 Matcha의 2배 느리므로 1스레드에서 **RTF ~2.3**,
+CM4에서 확실히 사용 불가.
+
+→ **`configs/runtime.yaml`의 스테이지 배분(llm 0.75 / tts 0.25 / asr 0.75 = 4코어에 7스레드)은
+CM4에서 재검토가 필요하다.** 이건 하드웨어가 아니라 설정 문제이므로 보드 결정과 별개로 유효한 항목이다.
+(`cpu_budget: null` 주석이 "CM4 실측 전까지는 고정하지 말 것"이라 해둔 게 바로 이 지점이다.)
+
+### 10.4 보드 비교 — NPU TOPS는 무의미하다
+
+| 보드 | 코어/클럭 | dotprod | i8mm | RAM | NPU 런타임 성숙도 | 가격 | 판정 |
+|---|---|---|---|---|---|---|---|
+| **CM4** | 4×A72@1.5 | ✗ | ✗ | ~8GB | 없음 | 4GB ~$95–110, 8GB ~$160, **리드타임 10–12주** | **LLM 불가. 이제 싸지도 않다** |
+| **CM5 / Pi 5** | 4×**A76**@2.4 | **✓** | ✗ | 2–16GB | 없음 | **from $67.50**, 생산 **2036**까지 | **최적** |
+| Radxa CM5 (RK3588S2) | 4×A76 + 4×A55 | ✓ | ✗ | **2–32GB** | 6 TOPS, **부분적** | ~$99–155 | CM4 캐리어 재사용 + RAM 필요 시 |
+| Jetson Orin Nano Super 8GB | 6×A78AE + Ampere | ✓ | ✗ | 8GB, **102 GB/s** | **CUDA/TensorRT = 최고 성숙** | $249 | LLM이 여유로워지는 유일한 옵션 |
+
+**NPU 현실 점검** [1차확인]: 우리 세 모델 타입(GGUF LLM / ONNX ASR / ONNX TTS)을
+전부 커버하는 NPU 런타임은 **없다.**
+- RK3588 RKNN: sherpa-onnx에 **SenseVoice(#2592)·Silero VAD(#2067)** 경로 있음.
+  **TTS RKNN 항목은 없다** — Matcha/Kokoro/VITS는 CPU만.
+- LLM은 RKLLM 전용(`.rkllm` 포맷, GGUF 아님), **W8A8만 — W4 없음**(2.3B ≈ 2.3GB).
+  Radxa 실측 Qwen2.5-1.5B 15.44 t/s.
+- ⚠️ `rknn-toolkit2` LICENSE = **"RKNN SDK License"** — Rockchip 제품 호환 목적에만 허용,
+  리버스 엔지니어링 금지, **Rockchip이 사유 없이 언제든 해지 가능.** 상업 제품이면 법무 검토 필수.
+
+→ **결정은 "NPU가 있나"가 아니라 "코어당 성능 + dotprod가 있나"로 내려야 한다.**
+
+### 10.5 보드와 무관하게 지금 당장 할 것 — warm-up을 디스크로
+
+**이번 조사에서 가장 값진 구현 항목이다** [1차확인].
+`llama_cpp/llama_cpp.py`에 **`llama_state_seq_save_file` / `llama_state_seq_load_file` /
+`llama_state_seq_get_data`가 이미 바인딩돼 있다** — 고수준 `Llama`가 안 쓸 뿐이다.
+
+→ 1144토큰 warm-up 프리픽스를 **빌드/최초 부팅 시 한 번 만들어 파일로 저장**하고
+매 프로세스 시작 때 로드하면, CM4의 **130~230초 warm-up이 파일 읽기로 바뀐다.**
+어떤 보드를 고르든 순이득이다. (`Llama.save_state()`는 쓸 수 없다 — 컨텍스트 전체 블롭이라
+1144토큰이 ~215 MiB, 4GB에서 불가.)
+
+참고 [1차확인]: Mi:dm KV는 f16 **192 KiB/token**(48층 × 8 KV헤드 × 128 × 2 × 2B).
+`type_k`/`type_v`로 q8_0 양자화하면 96 KiB/token으로 반감되지만
+**속도에는 무의미하다** — 디코드는 KV가 아니라 1.43GB 가중치 대역폭에 막혀 있다.
+RAM 절약 목적으로만 의미가 있고, 양자화 V는 보통 flash attention을 요구해 CPU 백엔드에서 검증 필요.
+
+### 10.6 부수 정정 — GLaDOS의 600ms는 측정치가 아니다
+
+[1차확인] GLaDOS 저장소에 **전체 시스템의 측정된 레이턴시 벤치마크가 없다.**
+저자 진술은 *"Getting round-trip response time under 600 milliseconds is a threshold"* —
+**목표 서술**이다. RK3588 언급도 *"Runs on a Rock5b with RK3588 NPU"*뿐 수치 없음.
+우리 survey가 이를 "**~600ms 왕복 목표**"로 적은 건 맞지만, 달성된 실측으로 읽히지 않도록
+**검증되지 않은 주장**임을 명시한다.
+
+[1차확인] **OpenLive**는 MIT이고 부품 선택이 우리와 거의 동일(Silero VAD + Smart-Turn +
+Kokoro/Supertonic)하지만 **런타임이 앱 내 WebGPU**이고 CPU-only/네이티브 ARM 경로가
+문서화돼 있지 않다 → **CM4급 CPU엔 그대로 못 쓴다.** 한국어 지원 명시 없음.
+
+### 10.7 권고와 실행 순서
+
+**CM4를 사지 말고 타깃을 CM5(또는 Radxa CM5)로 올린다.** 근거는 §10.1의 ISA 결함(회복 불가),
+§10.2의 동일 실리콘 실측(두 자리 초 응답), 그리고 CM4의 가격·리드타임 우위 소멸이다.
+마이그레이션 비용은 낮다 — CM5는 동일 55×40mm + 2×100핀이다(단 일부 핀 변경,
+composite/2-lane MIPI 제거, 5V/5A 권장 → 캐리어 검증 필요 [2차]).
+
+1. **CM5(또는 Pi 5) 1장으로 실측** — `llama-bench` pp512/tg128 @4T + SenseVoice int8 RTF
+   + Matcha RTF. CM4 4GB를 사는 것보다 싸고 정보량이 많다.
+2. **보드와 무관하게 즉시**: §10.5의 KV 프리픽스 파일화.
+3. **`runtime.yaml` 스테이지 배분 재검토** (§10.3) — TTS 1스레드는 CM4에서 실시간 미달.
+4. CM4를 굳이 산다면 **4GB가 아니라 8GB**, 그리고 제품 타깃이 아니라 **바닥 성능 참조기로만.**
+
+### 10.8 남은 미지
+
+- **CM4/CM5 실기 llama.cpp 수치는 웹에 존재하지 않는다.** 전부 Pi 4B(1.8GHz) 역산이고,
+  앵커 모델(Gemma E2B 2.88GiB)이 MatFormer 계열이라 dense인 Mi:dm과 활성 가중치 비율이
+  다를 수 있어 **디코드 예측이 낙관 쪽으로 틀릴 여지가 있다.**
+- **A72에서의 SenseVoice int8 RTF가 확인되지 않았다.** A55(0.175 @4T)와 A76(0.049 @4T)
+  사이라는 것만 안다. dotprod 부재가 ONNX Runtime MLAS의 int8 GEMM에 얼마나 걸리는지 미측정.
+- Arm 공식 문서(109697) 본문은 리다이렉트로 직접 회수 실패 — 다만 A72 = Armv8.0
+  no-dotprod/no-i8mm 결론은 GCC·LLVM 소스로 독립 이중 검증됐다.
+- CM5 캐리어 호환성은 2차 출처만 확인. 리스핀 판단 전 데이터시트 원문 확인 필요.
+
+---
+
+## 11. 잔여 축 통합 (TTS 후보 · 배포 아날로그) + 라이선스 함정 4·5번
+
+두 개의 병렬 스윕이 늦게 돌아왔다. 이미 §9·§10에 있는 내용은 생략하고 **바뀌는 것만** 적는다.
+
+### 11.1 🚨 우리 **기본 ASR**의 가중치가 Apache도 MIT도 아니다 (라이선스 함정 4)
+
+**직접 확인했다.** `models/sense-voice/LICENSE`의 전체 내용:
+
+```
+Ref to https://github.com/modelscope/FunASR?tab=readme-ov-file#license
+```
+
+라이선스 파일이 아니라 **링크 한 줄**이다. HF 카드도 `license: other`,
+`license_name: model-license` → **FunASR Model Open Source License v1.1**(Alibaba)이고,
+보고에 따르면 조항 4.2가 *"unjustified denigration"*에 대해 자동 해지된다 [2차].
+
+**이건 비교용 프리셋이 아니라 `configs/models.yaml`의 기본 ASR이다.**
+Supertonic의 OpenRAIL-M을 신중히 다뤘는데, 정작 이미 기본값으로 쓰고 있는 스테이지의
+가중치 라이선스를 아무도 확인한 적이 없다. **제품화 전 법무 확인 항목.**
+
+> 코드(FunASR)는 MIT여도 **가중치는 별개**다 — §7.2(Supertonic 번들의 MIT LICENSE가
+> 코드용이었던 것), §9.5(파생 모델의 HF 태그)와 정확히 같은 계열의 세 번째 변형이다.
+
+### 11.2 Supertonic 재평가 — 우리 측정보다 좋고, 우리가 못 쓰는 레버가 하나 있다
+
+새 1차 정보 둘:
+- **한국어 CER 3.26** — Supertonic README의 언어별 표에서 Qwen3-TTS 4.07, VoxCPM2 4.70을
+  이긴다 [1차확인]. §7.4에서 우리가 "명료도 동률"로 측정한 것과 모순이 아니다 —
+  우리 판정자(SenseVoice ITN)의 해상도가 낮았을 뿐이다.
+- **RPi4B(우리와 동일 SoC) RTF ≈0.44** [2차+추론: 141자 문장 4.25초 wall,
+  오디오 길이·스레드 수 미공개]. RPi5는 5스텝에서 0.150.
+
+**왜 A72에서 살아남는가** [추론, 근거 있음]: flow-matching은 **비자기회귀**라
+처리량이 int8 GEMM에 의존하지 않는다. §10.1의 dotprod 부재가 LLM을 죽이는 이유가
+여기엔 적용되지 않는다. (audio.cpp가 Supertonic을 **F32 전용**으로 싣는 것도
+int8이 A72급에서 이득이 없다는 약한 증거다.)
+
+**그런데 권고된 레버는 우리 경로에 없다 — 직접 확인했다.**
+"스텝 수를 8→5→2로 런타임에 조절"이 Supertonic의 핵심 장점으로 제시됐지만,
+`OfflineTtsSupertonicModelConfig`에 **스텝 필드가 없고**(duration_predictor / text_encoder /
+tts_json / unicode_indexer / vector_estimator / vocoder / voice_style 뿐),
+`tts.json`에도 step 키가 없다. `OfflineTtsConfig`에도 없다.
+→ **sherpa-onnx 경로로는 스텝 수를 못 바꾼다.** 그 속도 이득을 원하면
+upstream Python SDK(자체 의존성 고정)나 **v2 번들(5스텝 고정, 81MB)** 중 하나여야 한다.
+v2가 한국어를 지원하므로(en/ko/es/pt/fr) **v2를 재보는 것이 값싼 실험이다.**
+
+### 11.3 MeloTTS-Korean — OpenRAIL-M을 피할 실제 대안이 하나 있다
+
+§1.3에서 "한국어 CPU TTS 기성품이 없다"고 정리했는데 **하나 놓쳤다** [1차확인]:
+
+**`myshell-ai/MeloTTS-Korean` — 코드와 가중치 모두 MIT.** 한국어 체크포인트가 실제로 배포됨.
+VITS2 단일 forward pass, fp32 162MB / **int8 50MB**.
+그리고 한국어에 유리한 구조적 특성: **한국어는 BERT prosody 분기를 건너뛴다**
+(카드: `bert`/`ja_bert`가 KR에선 zero tensor) → 1024-dim BERT 인코더 비용을 안 낸다.
+
+단점: **어떤 하드웨어에서도 RTF가 공개되지 않았고**, 베이스 레포가 2024-12-24 이후 방치,
+화자 1명, 품질은 Supertonic보다 낮을 것, 그리고 g2pkk + mecab-ko-dic G2P 체인을 물고 온다
+(§1.3의 mecab 문제로 되돌아간다).
+
+→ **OpenRAIL-M이 법무에서 막히면 이게 답이다.** 그 경우에만 착수.
+
+### 11.4 Piper 한국어는 **존재한다. 단 non-commercial** (라이선스 함정 5)
+
+§1.3에 "Piper 한국어 없음"으로 적었는데 부정확했다.
+**`ko_KR-kss` 음성이 존재하고, KSS 데이터셋 유래라 CC-BY-NC-SA-4.0이다** [2차].
+즉 "없다"가 아니라 "상업 이용 불가"다. 결론은 같지만 이유가 다르므로 정정한다.
+
+같은 함정의 목록 — **permissive 코드 아래 CC-BY-NC 가중치** [2차]:
+F5-TTS, Spark-TTS, OuteTTS 1.0, OpenAudio S1-mini, MMS-TTS-kor, Piper `ko_KR-kss`.
+
+### 11.5 Smart Turn v3.2의 ARM 지연 — 예산에 없던 비용
+
+우리 `configs/turn_detector.yaml`은 "CPU ~12ms"를 전제로 서 있다. 그런데 [2차]:
+**AWS c8g.medium(Graviton, 1 vCPU)에서 159ms**, x86 c7a.2xlarge에서 9ms.
+
+우리 스레드 예산은 turn detector에 별도 배분이 없고(`detector.py:63`이
+`providers=["CPUExecutionProvider"]`로 고정), **이건 VAD 침묵 뒤에 실행되므로
+턴 지연에 그대로 더해진다.** CM4에서 100ms대라면 `barge_in_confirm_ms: 250`,
+`endpoint_grace_min_ms: 300`과 같은 자릿수가 되어 설계 전제가 흔들린다.
+
+추가로 [추론]: v3.1이 실제 사람 음성을 얻은 건 영어(88.3→94.7%)와 스페인어뿐이라
+**한국어는 여전히 합성 학습일 가능성이 높다.** 언어별 정확도 표는 미공개.
+
+→ **CM4 측정 항목에 Smart Turn 추론 시간을 추가**한다. TTS·ASR만 재면 안 된다.
+
+### 11.6 독립적으로 수렴한 아키텍처 — dual-STT 티어링
+
+§9.3에서 제안한 Vosk 하이브리드(저지연 partial + 정확한 최종)와 **똑같은 구조**를
+`RunanywhereAI/RCLI`가 이미 쓰고 있다 [2차]: *"Zipformer streaming + Whisper / Parakeet offline"*.
+서로 모르는 두 조사가 같은 답에 도달한 건 설계 검증으로 받아들일 만하다.
+
+함께 훔칠 것 [1차확인, OpenLive 소스]: **end-of-turn 모델을 ASR 디바이스와 분리**한다.
+OpenLive는 ASR이 WebGPU에 있어도 Smart-Turn은 **무조건 CPU EP**에서 돌리고,
+whisper-tiny의 mel 프론트엔드를 turn 모델의 feature processor로 **재사용**하며,
+세션 생성을 try/catch로 감싸 실패 시 `turnSession = null`로 두고 **plain VAD 타임아웃으로
+우아하게 강등**한다. 우리 `--endpoint-detect`가 지금 실패 시 어떻게 되는지 확인할 값이 있다.
+
+### 11.7 확정된 사망 목록 (재조사 금지)
+
+[1차/2차 확인] **Kokoro** — 한국어 음성이 **한 번도 배포된 적 없음**, `language:['en']`,
+issue #294가 2026-01-08 이후 무응답, 레포 2025-08-06 정지. §1.2 판정 확정.
+**ZipVoice** — README가 "Chinese and English"만 명시. 우리 sherpa 1.13.4에
+`OfflineTtsZipvoiceModelConfig`가 있어도 한국어 체크포인트가 없다.
+⚠️ 함정 기록: ZipVoice README의 언어 바는 **i18n 링크**지 지원 언어가 아니다.
+**KittenTTS**(영어 전용), **PocketTTS**(RTF 0.021 GGUF 2코어 — 이 조사 최고의 CPU 수치인데
+en/fr/de/pt/it/es, 한국어 없음), **Qwen3-TTS 0.6B**(Apache-2.0 + 좋은 한국어지만
+**Pixel 8a에서 RTF 2.06** → 산술적으로 불가), **OmniVoice**(한국어 8,609시간, Apache-2.0이나
+0.6B diffusion-LM, H100 벤치만, ONNX export 없음), **TEN Turn Detection**(Qwen2.5-7B, 영/중).
+
+⚠️ **TEN VAD** 주의 [1차확인]: Linux 프리빌드가 **x64 전용**이고 ARM은 Android/iOS만이다.
+우리는 sherpa-onnx 경유라 괜찮을 것이나 **CM4에서 확인 필요**.
+
+### 11.8 KsponSpeech — #2886이 고쳐져도 라이선스가 남는다
+
+[1차확인] `sherpa-onnx-streaming-zipformer-korean-2024-06-16` HF 레포에 **라이선스 태그가 없다.**
+학습 데이터는 **KsponSpeech**(AI Hub / NIA Korea)이고 취득에 **신청·승인이 필요**하다.
+상업 이용 및 모델 재배포 조건을 공개 출처로 확인할 수 없었다 [확인 불가].
+
+→ §9의 "#2886이 막힌 길"에 **두 번째 차단 요인**이 겹친다. 설령 상류가 고쳐도
+이 체크포인트를 제품에 넣으려면 KsponSpeech 조건을 먼저 정리해야 한다.
+한국 법인이라 신청 자체는 유리한 위치다.
