@@ -386,8 +386,8 @@ def should_decode(
     possibly be committed is ``min_decode_s + hop_s`` (one decode to form a
     hypothesis, one more to agree with it at the default agreement_n=2).
     Measured at the defaults that is ~1.29s, which is longer than most turns in
-    this project's own capture set -- so utterances shorter than that never
-    produce a partial at all.
+    this project's own capture set -- measured, 8 of 16 committed nothing usable
+    before finalize (one of them committed only ".", which is nothing).
     """
     if buffered_samples < int(min_decode_s * sample_rate):
         return False

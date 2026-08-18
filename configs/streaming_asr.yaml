@@ -75,8 +75,8 @@ chunked-sensevoice:
   # KNOWN LIMIT, measured. Do not try to tune around it: the earliest a prefix
   # can be committed is min_decode_s + hop_s = ~1.28s (one decode to form a
   # hypothesis, one more to agree with it). Most turns in this project's own
-  # capture set are shorter than that, so 7 of 16 real captures committed
-  # nothing at all before finalize. This engine makes --streaming-asr HONEST
+  # capture set are shorter than that, so 8 of 16 committed nothing usable
+  # before finalize (one of them committed only ".", which is nothing). This engine makes --streaming-asr HONEST
   # rather than fast; it does not deliver the latency win streaming was meant to
   # buy. The floor is a property of the checkpoint, not of these numbers.
   #
