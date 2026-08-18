@@ -482,3 +482,98 @@ LiveKit·Pipecat이 투기적 생성으로 싸우고 있는 문제를 이 레포
 즉 진짜 레버는 투기가 아니라 **프리픽스를 안정적으로 유지하는 것**이고, 그건 이미 그렇다.
 만약 나중에 프롬프트 앞부분이 턴마다 바뀌는 변경(예: 시간 표시, 동적 메모리 주입 위치)을
 넣는다면 이 4ms가 300ms로 돌아온다 — **그게 이 측정이 지켜야 할 불변식이다.**
+
+---
+
+## 9. 한국어 스트리밍 ASR 대안 (§6-1 미완 축 완료)
+
+§4에서 "이 축은 미완"으로 남겨둔 것을 마무리했다. 결론부터:
+**CM4에서 우리 1.29초 하한을 이길 수 있는 후보는 딱 하나, Vosk 한국어다.**
+그리고 그것은 최종 텍스트용이 아니라 **partial 전용 채널**로만 쓸 수 있다.
+
+### 9.1 가장 값진 것은 모델 목록이 아니라 아키텍처 판정 기준이다
+
+1초 미만 partial에는 **두 조건이 동시에** 필요하다:
+**(a) 프레임 동기** — 시각 t까지의 출력이 t 이후 입력으로 바뀌지 않음.
+**(b) 상태·캐시 이월** — 청크마다 앞부분을 재계산하지 않음.
+
+| 계열 | (a) | (b) | 판정 |
+|---|---|---|---|
+| Kaldi online (**Vosk**) | ✅ | ✅ | 격자를 증분 확장 → partial 단조, 증분 비용이 청크 길이 비례. **200~300ms 가능** |
+| Streaming transducer (RNN-T, cache-aware FastConformer/Zipformer) | ✅ | ✅ | **이론적 최적**. 한국어 옵션이 깨진 것(#2886) 아니면 CM4에 10배 무거운 것뿐 |
+| Streaming CTC | ✅ | 캐시 학습 시 ✅ | 한국어 Conformer-CTC는 cache-aware 미학습 → 2초 청크에서 20% 열화 |
+| **비자기회귀 whole-utterance (우리 SenseVoice)** | ❌ | ❌ | 재해석 가능 + 3.0x 증폭 + `min_decode_s+hop_s` 하한. **청킹으로 고칠 수 없는 구조적 문제** |
+| AED (Whisper) | ❌ | ❌ | 최악. 디코더까지 자기회귀 |
+
+→ **§7.4에서 측정한 두 결함(1.29초 하한, 내용 뒤집힘)은 튜닝 실패가 아니라
+SenseVoice가 (a)·(b)를 둘 다 안 갖췄기 때문이다.** `hop_s`를 줄여도 (a)는 안 생긴다.
+
+### 9.2 후보 정리
+
+| 모델 | 한국어 | 스트리밍 | 크기 | 라이선스 | 판정 |
+|---|---|---|---|---|---|
+| **vosk-model-small-ko-0.22** | ✅ | ✅ Kaldi online | 82MB | **Apache-2.0** [1차확인] | **유일한 실현 가능 후보** |
+| nemotron-3.5-asr-streaming-0.6b | ✅ ko-KR | ✅ **진짜 cache-aware 80ms** | q4_k 409MB | OpenMDW-1.1 | 기술적 최적이나 **CM4 RTF 8~16 추정 → no-go** |
+| SungBeom/stt_kr_conformer_ctc_medium | ✅ | ⚠️ 청크만 | 490MB | ⚠️ **태그 apache-2.0이나 Riva 파생** | **라이선스 선결** |
+| onnx-asr | ❌ 한국어 모델 0개 | — | — | MIT | 탈락 (로더로만 가치) |
+| Fun-ASR-Nano (streaming) | ❌ zh/en/ja | ✅ | 800M | Apache-2.0 | 탈락 |
+| Fun-ASR-MLT-Nano | ✅ 31개어 | ❌ offline | 800M | Apache-2.0 | 탈락 |
+| Paraformer streaming | ❌ zh/yue | ✅ | — | — | **한국어 Paraformer는 존재하지 않음** |
+| Parakeet v3 / Canary v2 | ❌ 유럽어 25개 | ❌ | — | CC-BY-4.0 | 탈락 |
+| whisper.cpp tiny/base | ⚠️ 약함 | ❌ AED | 75/142MB | MIT | 탈락 (아래) |
+
+- **#2886은 여전히 오픈**이고 수정·재export·대체 한국어 모델 제안이 **전부 없다** [1차확인].
+  sherpa-onnx의 한국어 스트리밍은 **2024-06 이후 2년 넘게 정체**다.
+- **Whisper는 개선이 아니다** [1차확인]: Pi 4(=CM4와 동일 A72) NEON 4스레드에서
+  인코더 단독 tiny 13.8s / base 30.6s per 30초 창 → RTF ≈0.46 / ≈1.02(디코더 별도).
+  메인테이너가 Pi 4 실시간을 낸 조건은 `tiny.en` + `-ac 512` + **step 4~7.5초** —
+  즉 **partial 입도가 우리보다 3~6배 나쁘고 영어 전용**이었다.
+
+### 9.3 Vosk 하이브리드 — 구체적 제안
+
+**Vosk = 저지연 partial + 엔드포인팅, SenseVoice = 최종 텍스트.**
+LLM에는 SenseVoice 결과만 넘기고, Vosk partial은 UI 표시·바지인 감지·발화 종료 판정에만 쓴다.
+
+받을 것 딱 둘:
+`https://alphacephei.com/vosk/models/vosk-model-small-ko-0.22.zip` (82MB, Apache-2.0)
+`pip install vosk==0.3.45` (aarch64 wheel 존재)
+
+**왜 최종 텍스트로 못 쓰는가**: WER **28.1** (Zeroth = 낭독체) [1차확인].
+실제 마이크 대화체는 더 나쁠 것 [추론]. 그리고 공식 한국어 모델은 이것 하나뿐이며
+Alphacephei의 신세대 zipformer 라인(ru/bn/uz)에 **한국어가 없다** [1차확인].
+OVOS도 정확도 때문에 Vosk에서 옮겨갔다 [1차확인].
+
+**명시할 트레이드오프**: (i) Kaldi 런타임 + 82MB 모델 + 런타임 ~300MB RAM이
+4GB CM4에서 SenseVoice·LLM·TTS와 경합 → **RAM 예산 확인이 선결**.
+(ii) ASR 둘을 동시 구동하면 코어 배분이 SenseVoice의 wall RTF 0.21을 악화시킨다.
+(iii) **Vosk의 ARM RTF 공식 수치가 1차 출처에 존재하지 않는다** — 첫 작업은 CM4 실측이어야 한다.
+
+### 9.4 하드웨어 로드맵 인자 — A72가 ISA에서 뒤처진다
+
+**Cortex-A72는 ARMv8.0-A라서 DotProd(SDOT/UDOT, v8.2+), i8mm(v8.6),
+FP16 산술(v8.2)이 전부 없다** [추론, 근거 강함]. 따라서 q4_k/q8_0 GGUF가
+최신 ARM에서 얻는 정수 가속을 CM4는 거의 못 받는다 —
+**양자화로 메모리는 줄지만 연산은 별로 안 빨라진다.**
+
+이게 Nemotron 판정을 뒤집는 지점이다. 그 모델은 한국어 CER 7.12~7.59에
+진짜 80ms cache-aware 스트리밍, OpenMDW-1.1, arm64 CPU 프리빌드까지 갖춰
+**우리 요구사항을 정확히 만족하는 유일한 모델**인데 CM4에선 못 돈다.
+**CM5 / RK3588급(Cortex-A76 = ARMv8.2 + DotProd)으로 올라가는 순간 이게 정답이 된다.**
+→ "보드를 구할지 타깃을 재검토할지"(FEATURES.md) 결정의 입력으로 기록.
+
+값싼 검증 하나: parakeet.cpp arm64 프리빌드 + q4_k GGUF(409MB)를 CM4에 올려
+**30분 안에 실측 가능**하다. 추정이 틀렸다면 판이 바뀐다.
+
+### 9.5 라이선스 규칙 확장 — HF 태그도 1차 출처가 아니다
+
+`llm-conversational-selection.md`는 "양자화 레포나 기억에서 라이선스를 가져오지 말 것"을
+규칙으로 갖고 있다. 이번에 **한 단계 더 필요하다는 사례**가 나왔다.
+
+`SungBeom/stt_kr_conformer_ctc_medium`은 HF cardData에 `license: apache-2.0`이라고
+적혀 있고 WER 11.51로 매력적이다. 그런데 카드 본문이 스스로 밝히듯 이 모델은
+NGC의 **RIVA Conformer ASR Korean 파인튜닝**이고, 그 NGC 페이지는
+*"you would be accepting the terms of the Riva license"* — **NVIDIA 독점, 자유 재배포 불가**다.
+
+→ **파생 모델의 HF 라이선스 태그는 원본 출처를 확인하기 전까지 1차 출처로 취급하지 말 것.**
+§7.2의 "번들 안 LICENSE가 MIT인데 가중치는 OpenRAIL-M"과 같은 계열의 함정이고,
+이번 주에 이 프로젝트가 만난 세 번째 라이선스 함정이다.

@@ -203,7 +203,13 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 4. ⬜ **재설계됨** — **진짜 스트리밍 ASR.** streaming-zipformer 경로는 **막혔다**:
    sherpa-onnx [#2886](https://github.com/k2-fsa/sherpa-onnx/issues/2886)(한국어 스트리밍이 빈
    문자열)이 2025-12-10 이후 미해결이고 원인 추정이 인코더 ONNX export 결함이라 우리가 못 고친다.
-   → **chunked SenseVoice + 기존 LocalAgreement** 재사용으로 방향 전환.
+   → **chunked SenseVoice + 기존 LocalAgreement**로 방향 전환, 구현·측정 완료.
+   단 그것은 정확도 회귀만 막고 **스트리밍 이득은 없다**(최초 커밋 1.29초).
+   구조적 이유가 확인됐다: 1초 미만 partial에는 **프레임 동기 + 상태 이월**이 둘 다 필요하고
+   SenseVoice는 둘 다 없다 — 청킹으로 고칠 수 없다.
+   **남은 유일한 후보는 Vosk 한국어(`vosk-model-small-ko-0.22`, 82MB, Apache-2.0)**를
+   partial 전용 채널로 쓰는 하이브리드다(WER 28.1이라 최종 텍스트로는 부적합).
+   상세: `research-delta-20260818.md` §9.
 5. ⬜ **(선택) 2단 컴퓨트/Wyoming** — 변화 없음. CM4 실기에서 발열/RAM 문제 시.
 
 **신규 (2026-08-18 델타에서 나온 것):**
@@ -233,6 +239,8 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 | OpenLive | 온디바이스 캐스케이드 | O(WebGPU) | 모델 의존 | Smart Turn | 조사 미완 | ★ 신규 배포 아날로그 |
 | Deepgram Flux | STT+EOT 통합 | **✗ 클라우드** | **✗**(10개어에 ko 없음) | 모델 내장 EOT | 프로프라이어터리 | ★★ 아이디어만⁵ |
 | livekit/turn-detector | 엔드포인터 | O(CPU) | **O(14개어)** | 텍스트 EOU | ⚠️ 프로프라이어터리 | ★ 폴백 후보 |
+| **Vosk (ko)** | 스트리밍 ASR | **O**(Kaldi online) | **O**(모델 1개뿐) | — | **Apache-2.0** | ★★ partial 전용 후보⁶ |
+| Nemotron 3.5 ASR streaming 0.6B | 스트리밍 ASR | ✗ **CM4 불가** | **O**(CER 7.1~7.6) | 80ms cache-aware | OpenMDW-1.1 | ★★ 차세대 보드용⁷ |
 | GLaDOS | 올인원 | O(느림)/NPU | ✗ | **최고** | MIT | ★★★ 턴 레퍼런스 |
 | HF speech-to-speech | 캐스케이드 | O | 모델 의존 | Silero VAD | Apache-2.0 | ★★★ 배포 아날로그 |
 | HA Assist+Wyoming | 위성+서버 | 위성 O | Whisper✅/Piper✗ | 기본 | Apache-2.0 | ★★ 프로토콜 |
@@ -260,6 +268,15 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 ⁵ Smart Turn·LiveKit EOU보다 EOT F1이 높다는 주장은 **벤더 주장**이고 벤치마크·데이터셋이
   미공개다. 가져올 것은 `EagerEndOfTurn`/`TurnResumed` 투기 패턴과 `eot_threshold=0.7`
   기본값이라는 데이터포인트뿐이다(§7 신규 액션 6·8).
+
+⁶ 한국어 공식 모델은 `vosk-model-small-ko-0.22` 하나뿐이고 WER 28.1(Zeroth, 낭독체)이라
+  최종 텍스트용으로는 부적합하다. 값은 다른 데 있다 — Kaldi online이라 partial이 **단조적**이고
+  하한이 청크 크기(≈0.2~0.3s)다. 즉 chunked SenseVoice의 두 결함(1.29초 하한, 내용 뒤집힘)을
+  동시에 없앤다. RAM ~300MB + 82MB 모델이 4GB에서 경합하는 게 미확인 리스크.
+⁷ 한국어 CER 7.12~7.59, 진짜 80ms cache-aware 스트리밍, arm64 CPU 프리빌드까지 있어
+  **우리 요구를 정확히 만족하는 유일한 모델**인데 CM4에서 RTF 8~16 추정으로 못 돈다.
+  **Cortex-A72는 ARMv8.0-A라 DotProd·i8mm·FP16 산술이 전부 없어** 양자화 이득도 못 받는다.
+  CM5/RK3588(A76 = ARMv8.2 + DotProd)로 올라가면 이게 정답이 된다 → 하드웨어 결정 인자.
 
 ## 9. 참고 링크
 
