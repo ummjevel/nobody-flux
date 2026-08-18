@@ -47,6 +47,7 @@ models/streaming-zipformer-ko/
 # model is OpenRAIL-M. Committing them would redistribute OpenRAIL-M artifacts
 # from this repo and drag its downstream-obligation clauses along with it.
 models/sherpa-supertonic-3/
+models/sherpa-supertonic-2/
 
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/

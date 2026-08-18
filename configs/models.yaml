@@ -286,9 +286,40 @@ tts:
   # prohibited, and providing medical advice is prohibited.
   # This is a product/legal decision, not only a technical one -- which is why
   # this is a preset to compare against and not the default.
+  # Supertonic **2** (2026-01, 5 languages incl. Korean). Same ONNX interface as
+  # v3 -- verified: identical file set, same 44100Hz, no language conditioning --
+  # so it reuses SherpaSupertonicTts with only the paths changed.
+  #
+  # Here because v3 traded a lot of speed for a little quality. sherpa-onnx's own
+  # PR #3605 says the RTF went "from about 0.028 to about 0.097" going v2 -> v3
+  # (v3 raised the flow-matching steps from 5 to 8), and the step count is NOT
+  # exposed by OfflineTtsSupertonicModelConfig, so v2 is the only way to get the
+  # cheaper setting through sherpa. Measured here: v2 is ~2.4x faster than v3 and
+  # ~1.7x faster than the default matcha-ko.
+  #
+  # Upstream reports Korean CER 3.65 (v2) vs 3.26 (v3) -- a 12% relative
+  # regression for that speed. Our own ASR round-trip cannot resolve a difference
+  # that small (see scripts/_ab_tts.py on stochastic synthesis).
+  #
+  # Same OpenRAIL-M weights licence as v3, so adopting it is no new legal decision.
+  supertonic-2-ko:
+    class: SherpaSupertonicTts
+    params:
+      duration_predictor: models/sherpa-supertonic-2/duration_predictor.int8.onnx
+      text_encoder: models/sherpa-supertonic-2/text_encoder.int8.onnx
+      vector_estimator: models/sherpa-supertonic-2/vector_estimator.int8.onnx
+      vocoder: models/sherpa-supertonic-2/vocoder.int8.onnx
+      tts_json: models/sherpa-supertonic-2/tts.json
+      unicode_indexer: models/sherpa-supertonic-2/unicode_indexer.bin
+      voice_style: models/sherpa-supertonic-2/voice.bin
+      speaker_id: 7
+
   supertonic-3-ko:
     class: SherpaSupertonicTts
     params:
-      # sid=7 measured best of the 10 voices on the ASR round-trip; sid=0 is
-      # mid-table. Do not assume the first index is the good one.
+      # sid=7, but NOT because it measured best. An earlier note here claimed a
+      # 10-speaker ranking from single-sample CER; synthesis turned out to be
+      # stochastic across processes, and that whole ranking (0.025-0.089) sat
+      # inside the measurement's own noise band. Treat the choice as arbitrary
+      # until someone listens to all ten.
       speaker_id: 7

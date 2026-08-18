@@ -314,9 +314,30 @@ class SherpaMatchaTts:
 
     k2-fsa itself only ships English (en_US-ljspeech) and Chinese (zh-baker)
     Matcha-TTS checkpoints (confirmed by hand against every sherpa-onnx
-    release, 1.12.19 through 1.13.2) -- no official Korean one. The
-    sherpa-matcha-ko preset (configs/models.yaml) points at a
-    community/custom-trained Korean acoustic model instead (see
+    release, 1.12.19 through 1.13.2) -- no official Korean one.
+
+    The sherpa-matcha-ko preset points at **this project's own Korean acoustic
+    model**: trained in-house, with the voice design and the training corpus
+    generated using Qwen3-TTS. `matcha-ko-voiceA-ep499-steps10` reads as voice A,
+    epoch 499, 10 flow-matching steps. Written down here because it was not
+    recorded anywhere and the ambiguous phrase "community/custom-trained" led a
+    later reader (see the Supertonic docstring below) to conclude the checkpoint
+    was of unknown origin and therefore a liability. It is the opposite: it is the
+    one stage whose weights this project controls outright.
+
+    The practical consequences are worth stating. It cannot be downloaded by any
+    setup script because it has not been published anywhere, not because its
+    origin is doubtful -- so a fresh machine needs it copied in by hand (see
+    scripts/setup_windows.ps1's warning). And the open licensing question is not
+    about the weights but about the corpus: whether Qwen3-TTS's terms permit its
+    output to be used as training data. Apache-2.0 would impose no such
+    restriction; that has not been verified here.
+
+    It also means this preset is improvable rather than merely replaceable, which
+    is what docs/tts-conversational-build-design.md's Path A is about.
+
+    Historical note: earlier text here inferred the lineage from ONNX metadata
+    (`maintainer: freyatts-ko`) and read it as a third-party community model (see
     models/sherpa-matcha-ko/, `maintainer: freyatts-ko` in its own ONNX
     metadata -- the same lineage as this project's freyatts-ko-voicea TTS
     preset). That checkpoint ships as *just* the acoustic model, no
@@ -451,26 +472,42 @@ class SherpaSupertonicTts:
 
     ## Measured, on this project's Windows CPU box (NOBODY_CPU_BUDGET=4)
 
-    10 speakers, 44100 Hz. Intelligibility by ASR round-trip (synthesize, then
-    transcribe with SenseVoice, then CER against the input) over 6 Korean
-    sentences, numbers excluded because SenseVoice applies inverse text
-    normalization and writes "3 시 20 분" for a correctly-spoken "세 시 이십 분":
+    10 speakers, 44100 Hz. Intelligibility by ASR round-trip, 3 repeats of an
+    8-sentence Korean set, median with the observed range (numbers excluded --
+    SenseVoice's inverse text normalization writes "3시 20분" for a correctly
+    spoken "세 시 이십 분", so it undoes the thing under test):
 
-        sid=7  CER 0.025   <- best; ties sherpa-matcha-ko
-        sid=0  CER 0.038      (the naive default is not the best voice)
-        sid=2  CER 0.089   <- worst
-        sherpa-matcha-ko      CER 0.025, RTF 0.31
+        preset             CER~   range          rtf~   rtfMx
+        sherpa-matcha-ko   0.043  0.021-0.053    0.27   0.32
+        supertonic-3-ko    0.064  0.064-0.074    0.47   0.60
+        supertonic-2-ko    0.074  0.064-0.117    0.16   0.21
 
-    So it matches the incumbent on intelligibility at its best voice and is
-    consistently ~1.7x slower (RTF 0.41-0.62 vs 0.31). Treat the CER ordering
-    among the good voices as noise: 6 sentences is ~150 reference characters, so
-    0.025 vs 0.038 is a two-character difference.
+    Repeats matter here and one run would have misled: synthesis is stochastic
+    across processes, and an earlier single-sample reading of this same comparison
+    put both presets at 0.074 and called it a tie. With ranges, matcha-ko's does
+    not overlap either Supertonic -- so **the incumbent is more intelligible, and
+    that difference is real**, while this preset is ~1.7x slower than it.
 
-    Its real advantages over sherpa-matcha-ko are not in that table: ten voices
-    instead of one (and tts.py's DEFAULT reference voice is flagged as a
-    placeholder to replace before anything user-facing), and a documented
-    provenance -- the Korean Matcha checkpoint is a hand-copied community model
-    that no setup script can download.
+    Supertonic **2** is the interesting one on speed: 2.9x faster than v3 and 1.7x
+    faster than matcha-ko, because v3 raised the flow-matching steps from 5 to 8
+    and that step count is not exposed through sherpa-onnx (checked:
+    OfflineTtsSupertonicModelConfig has no such field, nor does tts.json). See the
+    supertonic-2-ko preset. It does not change the recommendation -- matcha-ko is
+    already inside budget at 0.27 -- but it is the option if a slower board ever
+    makes TTS the binding constraint rather than the LLM.
+
+    Its one real advantage over sherpa-matcha-ko is voice choice: ten speakers
+    instead of one, which matters because this module's DEFAULT reference voice is
+    flagged as a placeholder to replace before anything user-facing.
+
+    An earlier version of this docstring also claimed an advantage in provenance,
+    on the grounds that the Korean Matcha checkpoint is an unattributable
+    community model. That was wrong, and the correction runs the other way:
+    sherpa-matcha-ko is **this project's own trained model** (see
+    SherpaMatchaTts). Owning the weights is a stronger position than borrowing
+    permissively-licensed ones -- it means the model can be retrained rather than
+    merely swapped, and it carries no third-party use restrictions, which
+    Supertonic's OpenRAIL-M weights do.
     """
 
     duration_predictor: Path = DEFAULT_SUPERTONIC_DIR / "duration_predictor.int8.onnx"

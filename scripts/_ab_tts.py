@@ -42,13 +42,31 @@ flavours because they answer two different questions:
 The second is the direct evidence for whether a deterministic Korean number
 expander is needed on the TTS input path.
 
-## Sample size
+## Synthesis is stochastic, so one measurement is not a measurement
 
-The default text set is small on purpose (fast enough to run while iterating).
-That makes the CER *ordering* between close candidates meaningless -- a few
-hundred reference characters means a 0.01 difference is one or two characters.
-The script prints the reference-character count so the number is never read as
-more precise than it is. Trust large gaps and RTF; distrust small CER gaps.
+Measured, the hard way: the same preset on the same text produced CER 0.032,
+0.043 and 0.074 across three separate runs of this script. That is not ASR
+variance -- SenseVoice returns byte-identical transcripts for a given wav, checked
+-- it is the TTS. Matcha is a flow-matching model with a `noise_scale`, and
+sherpa-onnx seeds it per process, so the audio differs between runs (different
+md5 *and* a different sample count for identical input). Within one process it is
+reproducible; across processes it is not, and there is no seed parameter exposed
+on `OfflineTtsConfig` or `generate()` to pin it.
+
+So this script repeats each preset `--repeat` times and reports the median with
+the observed min/max. Read the spread, not the median alone: on the default
+8-sentence set the spread for a single preset was ~4 characters out of 94, i.e.
+**CER resolution here is about ±0.04**. Two presets inside that band are not
+distinguishable, however many decimal places get printed.
+
+That band is wide enough to have misled earlier conclusions in this repo, so it is
+worth being blunt: a 10-speaker "ranking" spanning 0.025 to 0.089 was mostly
+noise, and "preset A ties preset B at 0.074" was two single samples from
+overlapping distributions. RTF is a different story -- it varies by a few percent
+and the gaps between these presets are 1.7x and 2.4x, far outside it.
+
+To resolve small CER differences, raise --repeat and add texts; do not read the
+existing numbers harder.
 
 Usage:
     python scripts/_ab_tts.py
@@ -102,7 +120,8 @@ NUMERIC_TEXTS = [
 @dataclass
 class Result:
     label: str
-    cer: float
+    cer: float                       # median across repeats
+    cers: list[float]                # one per repeat -- the spread is the point
     ref_chars: int
     errors: int
     empties: int
@@ -128,32 +147,43 @@ def write_wav(path: Path, samples: np.ndarray, rate: int) -> None:
         w.writeframes((np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes())
 
 
-def evaluate(label: str, tts, asr, out_dir: Path, load_s: float) -> Result:
+def evaluate(label: str, tts, asr, out_dir: Path, load_s: float, repeat: int = 3) -> Result:
     errors = ref_chars = empties = 0
     rtfs: list[float] = []
+    cers: list[float] = []
     rate = 0
 
-    for i, text in enumerate(PLAIN_TEXTS):
-        t0 = time.perf_counter()
-        samples, rate = tts.synthesize_audio(text)
-        elapsed = time.perf_counter() - t0
-        duration = len(samples) / rate if rate else 0.0
-        if duration:
-            rtfs.append(elapsed / duration)
+    # Repeat the whole set rather than each sentence: a run is the unit that
+    # varies, and repeating per sentence would understate the spread by averaging
+    # inside it.
+    for attempt in range(max(1, repeat)):
+        run_err = run_ref = 0
+        for i, text in enumerate(PLAIN_TEXTS):
+            t0 = time.perf_counter()
+            samples, rate = tts.synthesize_audio(text)
+            elapsed = time.perf_counter() - t0
+            duration = len(samples) / rate if rate else 0.0
+            if duration:
+                rtfs.append(elapsed / duration)
 
-        wav = out_dir / ("%s__plain%02d.wav" % (label.replace("=", ""), i))
-        write_wav(wav, samples, rate)
-        hyp = asr.transcribe_file(str(wav))
-        if is_effectively_empty(hyp):
-            # Either the synthesis produced nothing playable or it produced
-            # something the recognizer could not read at all. Both are total
-            # failures, but they are worth counting apart from the CER because
-            # CER 1.0 from one bad utterance and CER 1.0 across the board look
-            # identical in an aggregate.
-            empties += 1
-        counts = cer_detail(text, hyp)
-        errors += counts.total
-        ref_chars += counts.ref_len
+            wav = out_dir / ("%s__r%d_plain%02d.wav" % (label.replace("=", ""), attempt, i))
+            write_wav(wav, samples, rate)
+            hyp = asr.transcribe_file(str(wav))
+            if is_effectively_empty(hyp):
+                # Either the synthesis produced nothing playable or it produced
+                # something the recognizer could not read at all. Both are total
+                # failures, but they are worth counting apart from the CER because
+                # CER 1.0 from one bad utterance and CER 1.0 across the board look
+                # identical in an aggregate.
+                empties += 1
+            counts = cer_detail(text, hyp)
+            run_err += counts.total
+            run_ref += counts.ref_len
+
+        errors += run_err
+        ref_chars += run_ref
+        if run_ref:
+            cers.append(run_err / run_ref)
 
     numeric: list[tuple[str, str, str]] = []
     for j, (kind, text) in enumerate(NUMERIC_TEXTS):
@@ -164,7 +194,8 @@ def evaluate(label: str, tts, asr, out_dir: Path, load_s: float) -> Result:
 
     return Result(
         label=label,
-        cer=(errors / ref_chars) if ref_chars else 0.0,
+        cer=statistics.median(cers) if cers else 0.0,
+        cers=cers,
         ref_chars=ref_chars,
         errors=errors,
         empties=empties,
@@ -197,6 +228,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="for multi-speaker presets, score every speaker id separately -- "
              "speaker choice moved CER more than the choice of model did",
+    )
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=3,
+        help="how many times to run the whole text set per preset. Synthesis is "
+             "stochastic across processes (see module docstring), so 1 is not a "
+             "measurement.",
     )
     p.add_argument(
         "--keep-wavs",
@@ -248,7 +287,7 @@ def main() -> int:
                     print("  SKIP %-22s %s" % (label, type(exc).__name__))
                     continue
             try:
-                r = evaluate(label, inst, asr, out_dir, l_s)
+                r = evaluate(label, inst, asr, out_dir, l_s, args.repeat)
             except Exception as exc:
                 print("  FAIL %-22s %s: %s" % (label, type(exc).__name__, str(exc)[:120]))
                 continue
@@ -261,17 +300,22 @@ def main() -> int:
 
     print()
     print("=" * 78)
-    print("%-24s %6s %6s %6s %6s %7s %6s" % ("preset", "CER", "err", "rtf~", "rtfMx", "rate", "load"))
+    print("%-24s %6s %13s %6s %6s %7s %6s"
+          % ("preset", "CER~", "CER min-max", "rtf~", "rtfMx", "rate", "load"))
     print("-" * 78)
     for r in sorted(results, key=lambda x: (x.cer, x.rtf_median)):
         flag = "  <-- %d empty" % r.empties if r.empties else ""
-        print("%-24s %6.3f %6d %6.2f %6.2f %7d %6.2f%s"
-              % (r.label, r.cer, r.errors, r.rtf_median, r.rtf_max,
+        spread = ("%.3f-%.3f" % (min(r.cers), max(r.cers))) if r.cers else "-"
+        print("%-24s %6.3f %13s %6.2f %6.2f %7d %6.2f%s"
+              % (r.label, r.cer, spread, r.rtf_median, r.rtf_max,
                  r.sample_rate, r.load_s, flag))
     print("-" * 78)
-    print("CER over %d reference chars -- a 0.01 gap is ~%d character(s). Ordering"
-          % (results[0].ref_chars, max(1, round(results[0].ref_chars * 0.01))))
-    print("between close candidates is noise; trust large gaps and RTF.")
+    per_run = results[0].ref_chars // max(1, len(results[0].cers))
+    print("CER~ is the median of %d run(s) over %d reference chars each; a 0.01 gap is"
+          % (len(results[0].cers), per_run))
+    print("~%d character(s). Synthesis is stochastic across runs -- if two presets'"
+          % max(1, round(per_run * 0.01)))
+    print("min-max ranges overlap, they are NOT distinguishable. Trust RTF.")
     print("RTF < 1.0 means faster than real time. rtfMx is the worst sentence,")
     print("which is what bounds TTFA on the first chunk of a reply.")
 

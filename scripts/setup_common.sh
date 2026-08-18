@@ -306,4 +306,19 @@ else
     echo "Already present at $SUPERTONIC_DIR, skipping."
 fi
 
+SUPERTONIC2_DIR="$PROJECT_ROOT/models/sherpa-supertonic-2"
+if [ ! -f "$SUPERTONIC2_DIR/vector_estimator.int8.onnx" ]; then
+    echo "Downloading sherpa-onnx-supertonic-tts-int8-2026-03-06 (v2, ~81MB, 5 languages)..."
+    echo "  (v2 as well as v3: v3 raised the flow-matching steps 5->8 and is ~2.9x slower;"
+    echo "   the step count is not adjustable through sherpa-onnx, so v2 is the fast path.)"
+    TMP_TAR="$(mktemp --suffix=.tar.bz2)"
+    curl -L -o "$TMP_TAR" \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2"
+    mkdir -p "$SUPERTONIC2_DIR"
+    tar xjf "$TMP_TAR" -C "$SUPERTONIC2_DIR" --strip-components=1
+    rm -f "$TMP_TAR"
+else
+    echo "Supertonic 2 already present, skipping."
+fi
+
 echo "== [$TARGET_LABEL] setup complete =="
