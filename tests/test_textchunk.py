@@ -85,5 +85,23 @@ def test_sanitize_collapses_whitespace():
     assert sanitize_for_tts("안녕   하세요\n반가워") == "안녕 하세요 반가워"
 
 
-def test_sanitize_keeps_digits_and_punctuation():
-    assert sanitize_for_tts("3시에 만나!") == "3시에 만나!"
+def test_sanitize_keeps_punctuation_and_expands_digits():
+    """Digits are kept by the emoji filter -- and then expanded.
+
+    This test previously asserted "3시에 만나!" survived unchanged, which pinned
+    the *absence* of number expansion. That absence was a known gap, not a
+    contract: persona.py asks the model to write "세 시", docs/FEATURES.md records
+    it not complying, and scripts/_ab_tts.py measured both TTS presets
+    mispronouncing raw numerals. sanitize_for_tts now closes it (see its
+    docstring and src/nobody_flux/korean_tn.py).
+
+    What the original test was really guarding -- that digits are not silently
+    dropped the way emoji are -- still holds: they come out as Hangul, not gone.
+    """
+    assert sanitize_for_tts("3시에 만나!") == "세 시에 만나!"
+
+
+def test_sanitize_drops_emoji_between_a_numeral_and_its_counter():
+    """Ordering check. Dropping runs before expansion, so an emoji wedged
+    between the numeral and the counter cannot hide the counter."""
+    assert sanitize_for_tts("3😊시에 만나") == "세 시에 만나"

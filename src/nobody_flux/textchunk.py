@@ -18,6 +18,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from . import korean_tn
+
 _WHITESPACE = re.compile(r"\s+")
 # Zero-width joiner + variation selectors -- glue that turns codepoints into
 # composite emoji; strip so they don't linger after the emoji itself is gone.
@@ -25,13 +27,34 @@ _EMOJI_GLUE = {"‍", "︎", "️"}
 
 
 def sanitize_for_tts(text: str) -> str:
-    """Drop characters a phoneme TTS can't speak (emoji/pictographs and other
-    symbol-other codepoints) and collapse whitespace. Small local models emit
-    emoji despite persona.py asking them not to (LFM2 especially -- see
-    configs/models.yaml); left in, an emoji that lands alone in its own
-    streamed chunk makes sherpa's Matcha return zero samples (it can't tokenize
-    it), which is an unplayable chunk. Returns "" if nothing speakable remains,
-    which the caller treats as "skip this chunk"."""
+    """Make a chunk speakable: drop what a phoneme TTS can't say, and rewrite
+    what it would say wrong.
+
+    Two steps, in this order.
+
+    First, drop characters a phoneme TTS can't speak (emoji/pictographs and
+    other symbol-other codepoints) and collapse whitespace. Small local models
+    emit emoji despite persona.py asking them not to (LFM2 especially -- see
+    configs/models.yaml); left in, an emoji that lands alone in its own streamed
+    chunk makes sherpa's Matcha return zero samples (it can't tokenize it),
+    which is an unplayable chunk. Returns "" if nothing speakable remains, which
+    the caller treats as "skip this chunk".
+
+    Second, expand digits and Latin into Hangul (korean_tn.expand). Dropping
+    happens first on purpose: an emoji sitting between a numeral and its counter
+    ("3<emoji>시") would otherwise hide the counter from the expander, and
+    "3시" -> "세 시" needs to see them adjacent.
+
+    docs/code-review-20260814.md nominated this function as the single
+    checkpoint for that expansion, and the measurements agree it is needed:
+    persona.py asks the model to write "세 시" rather than "3시" and
+    docs/FEATURES.md records the model not complying, while scripts/_ab_tts.py
+    found *both* TTS presets mispronouncing numbers on their own
+    (sherpa-matcha-ko read 12,000 as "만 천"; supertonic-3-ko left it as digits).
+    The prompt instruction stays as the first layer -- the model's own counter
+    agreement is better than a table's -- and this is the deterministic guard for
+    whatever survives it.
+    """
     kept = []
     for ch in text:
         if ch in _EMOJI_GLUE:
@@ -42,7 +65,10 @@ def sanitize_for_tts(text: str) -> str:
         if unicodedata.category(ch) in ("So", "Cs", "Co", "Cn"):
             continue
         kept.append(ch)
-    return _WHITESPACE.sub(" ", "".join(kept)).strip()
+    cleaned = _WHITESPACE.sub(" ", "".join(kept)).strip()
+    if not cleaned:
+        return ""
+    return korean_tn.expand(cleaned)
 
 # Sentence-final marks: cut *after* one of these (keeping it, TTS prosody uses
 # it). Covers ASCII + CJK fullwidth forms since a Korean 0.6B model emits both.
