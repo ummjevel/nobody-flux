@@ -6,7 +6,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from src.nobody_flux import registry
+
+
+@pytest.fixture(autouse=True)
+def _ignore_ambient_cpu_budget(monkeypatch):
+    """Keep NOBODY_CPU_BUDGET out of these tests.
+
+    `registry` checks the environment variable *before* falling back to
+    os.cpu_count(), so an ambient NOBODY_CPU_BUDGET silently overrides the
+    monkeypatched core count and every expectation below fails with no hint as
+    to why. That is not hypothetical: the CM4-proxy measurement workflow exists
+    precisely to be run as `NOBODY_CPU_BUDGET=4 ...`, so a shell that has just
+    taken a measurement is the normal case, not an odd one.
+    """
+    monkeypatch.delenv("NOBODY_CPU_BUDGET", raising=False)
 
 
 def test_four_core_target_allocation(monkeypatch):
