@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from .detector import TurnDetector
 
 from ..paths import PROJECT_ROOT
+from .verdict import TurnVerdict, judge_acoustic
 
 SAMPLE_RATE = 16_000
 FRAME_MS = 30
@@ -526,7 +527,11 @@ class VadStream:
             return
 
         is_complete, prob = self._turn_detector.predict(combined, SAMPLE_RATE)
-        if is_complete or len(combined) >= self._max_samples:
+        verdict = judge_acoustic(
+            is_complete=is_complete,
+            at_max_duration=len(combined) >= self._max_samples,
+        )
+        if verdict is TurnVerdict.FINISHED:
             self._pending = Utterance(
                 audio=combined,
                 sample_rate=SAMPLE_RATE,
@@ -535,7 +540,7 @@ class VadStream:
             yield VadEvent.UTTERANCE_READY
             return
 
-        # Incomplete: keep the audio and listen for the continuation. How long
+        # UNFINISHED: keep the audio and listen for the continuation. How long
         # to wait scales with how incomplete it looked -- see
         # grace_frames_for_prob. Bounded by that grace and by max_speech_duration.
         self._grace_frames = self._config.grace_frames_for_prob(prob)

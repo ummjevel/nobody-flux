@@ -73,7 +73,7 @@ from src.nobody_flux.audio.player import SessionPlayer, StreamPlayer
 from src.nobody_flux.memory import consolidate_memories, extract_memories, format_recall_block
 from src.nobody_flux.paths import PROJECT_ROOT
 from src.nobody_flux.storage import ConversationStore
-from src.nobody_flux.turn.backchannel import is_backchannel, is_empty_transcript
+from src.nobody_flux.turn.backchannel import is_empty_transcript
 from src.nobody_flux.turn.controller import (
     CaptureFailed,
     CapturedTurn,
@@ -81,6 +81,7 @@ from src.nobody_flux.turn.controller import (
     TurnState,
 )
 from src.nobody_flux.turn.vad import VadEvent
+from src.nobody_flux.turn.verdict import judge_transcript, should_respond
 
 SESSION_AUDIO_DIR = PROJECT_ROOT / "data" / "sessions"
 
@@ -469,8 +470,8 @@ class ConversationSession:
             # speech_duration_s, not duration_s: the buffer length includes
             # pre_roll_ms (500ms) of padding, which pushed every capture past
             # BACKCHANNEL_MAX_DURATION_S and made this gate dead code.
-            should_continue_after_asr=lambda text: not (
-                is_empty_transcript(text) or is_backchannel(text, turn.speech_duration_s)
+            should_continue_after_asr=lambda text: should_respond(
+                judge_transcript(text, turn.speech_duration_s)
             ),
             # Phase 4: polled between LLM deltas, so an interruption lands
             # during generation rather than after it.

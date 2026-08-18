@@ -60,13 +60,35 @@ def is_empty_transcript(text: str) -> bool:
 
     A single character is included because that is what a bare syllable
     fragment looks like ("그"), and one syllable carries no answerable content.
-    Anything genuinely meant as a one-word reply ("네", "응") is caught by
-    is_backchannel below, which skips the turn for the same reason.
+
+    CAUTION -- this docstring used to claim that "anything genuinely meant as a
+    one-word reply ('네', '응') is caught by is_backchannel below". That is not
+    true, and the two examples it named are the proof: both are one character, so
+    this function returns True for them and they never reach is_backchannel at
+    all. Half of BACKCHANNEL_WORDS is shadowed the same way -- 네 넵 아 어 예 오
+    와 음 응 헐 are unreachable entries, while the two-syllable ones (그래, 맞아,
+    어어, 진짜 ...) do work.
+
+    Today that costs nothing user-visible, because EMPTY and WAIT both skip the
+    turn. Two things it does cost:
+
+      - Real one-syllable turns are discarded. "뭐?" and "왜?" are ordinary
+        반말 questions and this treats them as silence.
+      - The diagnostic lies. talk.py counts consecutive empty turns and warns
+        that the microphone is probably dead; a user saying "뭐?" three times
+        trips that warning.
+
+    Not changed here, deliberately: separating "그" (a fragment) from "뭐" (a
+    word) is a lexical judgement needing a word list, not a length tweak, and the
+    <= 1 rule was itself written against an observed failure. See
+    docs/FEATURES.md's human-verification list.
     """
     return len(_normalize(text)) <= 1
 
 
-def is_backchannel(text: str, duration_s: float) -> bool:
+def is_backchannel(
+    text: str, duration_s: float, max_duration_s: float = BACKCHANNEL_MAX_DURATION_S
+) -> bool:
     """True if `text` (an ASR transcript) together with the utterance's
     `duration_s` looks like backchannel rather than a real conversational
     turn -- see module docstring for why both signals matter together (a
@@ -75,7 +97,14 @@ def is_backchannel(text: str, duration_s: float) -> bool:
     conservatively -- unrecognized short utterances are treated as real
     turns rather than silently dropped, since dropping something the user
     actually said is worse than answering a stray sound).
+
+    `max_duration_s` defaults to the module constant, so callers that don't pass
+    it behave exactly as before. It exists as a parameter because the constant is
+    an estimate with no config slot -- code-review #9 flagged that, and
+    docs/FEATURES.md lists it as awaiting real labelled recordings via
+    scripts/_calibrate_turn_params.py. A parameter is what lets that calibration
+    land in a yaml later without touching this function again.
     """
-    if duration_s > BACKCHANNEL_MAX_DURATION_S:
+    if duration_s > max_duration_s:
         return False
     return _normalize(text) in BACKCHANNEL_WORDS
