@@ -208,10 +208,13 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 
 **신규 (2026-08-18 델타에서 나온 것):**
 
-6. ⬜ **투기적 LLM 프리필** — Deepgram Flux의 `EagerEndOfTurn`/`TurnResumed` 패턴을,
-   전체 생성이 아니라 **프리필만** 투기하는 형태로. llama.cpp `cache_prompt` + `--cache-reuse`가
-   이미 제공하며, 취소가 아니라 **결과 게이팅**이라 LiveKit·Pipecat이 아직 못 고친 이중 발화
-   버그 클래스를 구조적으로 회피한다. 착수 전 **CM4 프리필 tok/s 게이트** 필수.
+6. ❌ **투기적 LLM 프리필 — 측정 후 기각.** 게이트를 통과하지 못했다.
+   턴당 프리필이 153~303ms인데 그중 **117ms가 투기로 제거 불가능한 고정 오버헤드**이고,
+   나머지는 발화 3~16토큰(35~185ms)뿐이다. 없애려던 큰 비용(정적 프리픽스 1144토큰)은
+   `warm_up()`이 이미 인사말 뒤에 숨겨서 지불한다. 직접 비교에서 절약 ~43ms 대 추가 지출 ~200ms.
+   상세: `research-delta-20260818.md` §8.
+   **업계가 이 트릭을 쓰는 이유는 그들의 LLM이 원격이어서 프리픽스 캐시를 못 들고 있기
+   때문이고, 우리는 로컬이라 이미 들고 있다.**
 7. ⬜ **한국어 숫자·영문 확장기 자작** — permissive + JVM 없음 + native 의존 없음 + aarch64
    가능을 다 만족하는 기성품이 **하나도 없다**(GPL: KoG2P·KoNLPy / LGPL: num2words·kiwipiepy /
    mecab 강제: g2pK 계열 전부 / aarch64 wheel 없음: pynini→NeMo). 실측상 **Matcha·Supertonic
