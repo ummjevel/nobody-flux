@@ -6,6 +6,11 @@
 
 ## 0. 핵심 결론 (먼저)
 
+> **2026-08-18 갱신.** 이 문서는 2026-08-14 기준이고, 그 뒤 델타 조사에서 결론 두 개가
+> 뒤집혔다(#5는 아래에서 고쳐 적었고, §7의 액션 #1·#2는 구현 완료다).
+> 근거·실측·라이선스 정밀 확인은 **`docs/output/research-delta-20260818.md`**에 있다.
+> 이 문서는 지형도, 그 문서는 델타다 — 상충하면 그쪽이 최신이다.
+
 조사 전체를 관통하는 결론 다섯 가지:
 
 1. **Smart Turn v3는 우리에게 정답이었다 (이미 도입함).** 8MB int8 ONNX, CPU 12ms, 한국어 포함
@@ -18,8 +23,18 @@
    깔끔하고, "문장 중간 멈춤(unfinished)"·"잠깐만(wait)"이 우리 barge-in/backchannel에 직결.
 4. **GLaDOS가 턴테이킹/barge-in 레퍼런스 구현.** 언어 불문이라 한국어에 바로 이식 — 특히 문장
    단위 스트리밍 TTS + "끼어들면 재생 중단하고 응답을 히스토리에서 잘라내기".
-5. **한국어 TTS가 최대 리스크(재확인).** CPU + 상업 라이선스 한국어 신경망 TTS는 기성품이 없음
-   (Piper 한국어 없음, XTTS는 GPU+비상업, Supertonic GPU) → 우리 TTS 문서(`tts-*.md`) 결론과 일치.
+5. ~~**한국어 TTS가 최대 리스크(재확인).** CPU + 상업 라이선스 한국어 신경망 TTS는 기성품이 없음
+   (Piper 한국어 없음, XTTS는 GPU+비상업, Supertonic GPU)~~
+   **← 2026-08-18 정정. "Supertonic GPU"가 틀렸다.** Supertonic은 온디바이스 ONNX가 정체성이고,
+   Supertonic 3은 31개어(한국어 포함)이며 **이미 고정된 sherpa-onnx 1.13.4에 통합돼 있다**
+   (`OfflineTtsSupertonicModelConfig` — 범프 불필요). character-level이라 **G2P도 필요 없다**.
+   즉 "기성품이 없다"는 사실이 아니었다.
+   단 이게 리스크를 없애주진 않았다 — **실측하니 현행 `sherpa-matcha-ko`를 못 이겼다**:
+   명료도 동률(CER 0.074), **속도 2배 열세**(RTF 0.37 → 0.73), 숫자 처리 열세.
+   그리고 가중치가 **OpenRAIL-M**이다(번들 안 LICENSE는 MIT지만 그건 코드용 — §9 주의).
+   → 리스크의 정체가 "후보가 없다"에서 **"CM4에서 실시간을 지킬 후보가 없다"**로 바뀌었다.
+   상세: `research-delta-20260818.md` §1.1, §7.2, §7.4.
+   그리고 **Kokoro는 대안이 아니다** — 한국어 음성이 아예 없다(`lang_code`에 `ko` 없음).
 
 ## 1. 지형 개관 (5개 카테고리)
 
@@ -178,19 +193,43 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 
 ## 7. 우선순위 액션 (제안)
 
-1. **`endpoint_grace_ms` 적응화** — 고정 대신 Smart Turn `prob_complete`로 침묵 대기를 동적 조정
-   (LiveKit/Kyutai 패턴, 우리가 이미 가진 부품으로 가능).
-2. **문장 단위 스트리밍 TTS + "끼어들면 응답 clip"** — GLaDOS 방식으로 barge-in을 성숙화(TTFA↓ + 자연스러운 중단).
-3. **3-상태 턴 추상화** — barge-in/backchannel/endpoint를 finished/unfinished/wait로 통합 리팩터(TEN).
-4. **(선택) 진짜 스트리밍 ASR** — streaming-zipformer에 LocalAgreement 얹어 부분 transcript/조기 엔드포인트.
-5. **(선택) 2단 컴퓨트/Wyoming** — CM4 실기에서 발열/RAM 문제 시 wake-word 게이트 + 프로토콜 분리.
+1. ✅ **완료** — **`endpoint_grace_ms` 적응화.** `vad.py:277-293` `grace_frames_for_prob()`가
+   Smart Turn `P(complete)`로 300~800ms를 선형 보간한다.
+2. ✅ **완료** — **문장 단위 스트리밍 TTS + 끼어들면 응답 clip.** `textchunk.py` +
+   `pipeline.run_streaming` + `llm.py:227-230`(중단된 응답은 히스토리에 안 남김).
+3. ⬜ **미착수** — **3-상태 턴 추상화**(TEN). 주의: `TurnState`(IDLE/LISTENING/RESPONDING)가
+   `controller.py:81`에 **이미 있다.** 대화 상태 3개와 턴 판정 3개(finished/unfinished/wait)는
+   **다른 축**이라, 새로 만드는 게 아니라 두 축의 관계와 이름을 정리하는 일이다.
+4. ⬜ **재설계됨** — **진짜 스트리밍 ASR.** streaming-zipformer 경로는 **막혔다**:
+   sherpa-onnx [#2886](https://github.com/k2-fsa/sherpa-onnx/issues/2886)(한국어 스트리밍이 빈
+   문자열)이 2025-12-10 이후 미해결이고 원인 추정이 인코더 ONNX export 결함이라 우리가 못 고친다.
+   → **chunked SenseVoice + 기존 LocalAgreement** 재사용으로 방향 전환.
+5. ⬜ **(선택) 2단 컴퓨트/Wyoming** — 변화 없음. CM4 실기에서 발열/RAM 문제 시.
+
+**신규 (2026-08-18 델타에서 나온 것):**
+
+6. ⬜ **투기적 LLM 프리필** — Deepgram Flux의 `EagerEndOfTurn`/`TurnResumed` 패턴을,
+   전체 생성이 아니라 **프리필만** 투기하는 형태로. llama.cpp `cache_prompt` + `--cache-reuse`가
+   이미 제공하며, 취소가 아니라 **결과 게이팅**이라 LiveKit·Pipecat이 아직 못 고친 이중 발화
+   버그 클래스를 구조적으로 회피한다. 착수 전 **CM4 프리필 tok/s 게이트** 필수.
+7. ⬜ **한국어 숫자·영문 확장기 자작** — permissive + JVM 없음 + native 의존 없음 + aarch64
+   가능을 다 만족하는 기성품이 **하나도 없다**(GPL: KoG2P·KoNLPy / LGPL: num2words·kiwipiepy /
+   mecab 강제: g2pK 계열 전부 / aarch64 wheel 없음: pynini→NeMo). 실측상 **Matcha·Supertonic
+   둘 다 숫자·라틴을 틀린다** — 프리셋 고유 문제가 아니다.
+8. ⬜ **`complete_threshold` 캘리브레이션** — 현재 0.5는 Smart Turn 스톡값이고 `detector.py:50`이
+   "not tuned here"라고 인정한다. Deepgram이 `eot_threshold` 기본을 0.7로 잡은 게 데이터포인트.
 
 ## 8. 비교표 (요약)
 
 | 프로젝트 | 유형 | 로컬 CPU | 한국어 | 턴/중단 | 라이선스 | 우리 관련도 |
 |---|---|---|---|---|---|---|
 | Pipecat | 캐스케이드 | 오케스트레이터 O | Smart Turn 경유 | 강함 | Apache-2.0 | ★★★ 동일 구조 |
-| **Smart Turn v3** | 엔드포인터 | **O** | **O(23개어)** | 오디오 EOU | Apache-2.0 | ★★★ 이미 도입 |
+| **Smart Turn v3** | 엔드포인터 | **O** | **O(23개어)** | 오디오 EOU | **BSD-2-Clause**¹ | ★★★ 이미 도입 |
+| **Supertonic 3** | TTS | **O**(ONNX int8) | **O**(31개어) | — | 코드 MIT / **가중치 OpenRAIL-M**² | ★★★ 프리셋 추가함, 기본 아님³ |
+| Kokoro-82M | TTS | O | **✗ 한국어 없음**⁴ | — | Apache-2.0 | ✗ 후보 아님 |
+| OpenLive | 온디바이스 캐스케이드 | O(WebGPU) | 모델 의존 | Smart Turn | 조사 미완 | ★ 신규 배포 아날로그 |
+| Deepgram Flux | STT+EOT 통합 | **✗ 클라우드** | **✗**(10개어에 ko 없음) | 모델 내장 EOT | 프로프라이어터리 | ★★ 아이디어만⁵ |
+| livekit/turn-detector | 엔드포인터 | O(CPU) | **O(14개어)** | 텍스트 EOU | ⚠️ 프로프라이어터리 | ★ 폴백 후보 |
 | GLaDOS | 올인원 | O(느림)/NPU | ✗ | **최고** | MIT | ★★★ 턴 레퍼런스 |
 | HF speech-to-speech | 캐스케이드 | O | 모델 의존 | Silero VAD | Apache-2.0 | ★★★ 배포 아날로그 |
 | HA Assist+Wyoming | 위성+서버 | 위성 O | Whisper✅/Piper✗ | 기본 | Apache-2.0 | ★★ 프로토콜 |
@@ -201,6 +240,23 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 | Moshi/Unmute | 풀-듀플렉스 | **✗ GPU** | 영/불 | 내재 | 관대 | ★ 아이디어 |
 | TEN | 그래프 | **✗ GPU** | **✗** | 3-상태 | Apache-2.0 | ★ 추상화 |
 | Ultravox | 스피치 네이티브 | **✗ GPU** | LLM 의존 | 내재 | 오픈웨이트 | 참고 |
+
+¹ 이 문서 초판은 Apache-2.0이라고 적었다. HF 모델카드 1차 확인 결과 **BSD-2-Clause**다.
+² **주의.** sherpa-onnx 재배포 번들 안의 `LICENSE` 파일은 MIT인데, 그건 Supertone의 *샘플 코드*
+  라이선스다. 같은 디렉터리의 upstream README가 "The accompanying model is released under the
+  OpenRAIL-M License"라고 명시한다. 번들만 읽으면 MIT라고 결론 낸다 —
+  `llm-conversational-selection.md`가 경고한 함정의 실물이다. 상업 이용은 royalty-free로
+  허용되나 사용 제한을 **하위 계약에 강제 조항으로 전달**해야 하고, 음성 컴패니언에 걸리는
+  제한이 셋 있다(기계 생성 미고지 금지 / 동의 없는 사칭 금지 / **의료 조언 금지**).
+³ 실측(`scripts/_ab_tts.py`, `NOBODY_CPU_BUDGET=4`): 명료도 **동률**(CER 0.074, 94자 중 7오류),
+  **속도 2배 열세**(RTF 중위 0.37 → 0.73, 최악 0.53 → 0.86), 로드는 7배 빠름(9.8s → 1.3s).
+  화자 10명 중 **sid=7**이 최고, sid=0은 중간. 최악 RTF 0.86은 28코어를 4코어로 제한한 값이라
+  **CM4 실기에선 1.0(실시간)을 넘길 가능성이 크다** → 실기 측정 전 채택 불가.
+⁴ `kokoro` PyPI의 `lang_code` = `a,b,e,f,h,i,j,p,z`. `misaki`에 `ko.py`/`g2pkc`가 있지만
+  대응하는 음성이 없는 스텁이고, sherpa-onnx의 Kokoro도 영어+중국어만이다.
+⁵ Smart Turn·LiveKit EOU보다 EOT F1이 높다는 주장은 **벤더 주장**이고 벤치마크·데이터셋이
+  미공개다. 가져올 것은 `EagerEndOfTurn`/`TurnResumed` 투기 패턴과 `eot_threshold=0.7`
+  기본값이라는 데이터포인트뿐이다(§7 신규 액션 6·8).
 
 ## 9. 참고 링크
 
