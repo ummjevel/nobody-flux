@@ -35,6 +35,19 @@ models/sherpa-matcha-ko/
 # scripts/setup_common.sh, not committed. Same rule as the weights above.
 models/streaming-zipformer-ko/
 
+# Supertonic 3 TTS checkpoint -- whole directory, and the whole directory
+# specifically because the *.onnx rule above is not enough here: this bundle
+# carries model data in `voice.bin` (the 10 speaker styles) and
+# `unicode_indexer.bin`, neither of which matches an extension rule above, so
+# without this line they would be committed.
+#
+# They must not be. The weights are OpenRAIL-M, not MIT -- note that the
+# LICENSE file *inside* the bundle says MIT, which is Supertone's license for
+# their sample code, while the upstream README in the same directory states the
+# model is OpenRAIL-M. Committing them would redistribute OpenRAIL-M artifacts
+# from this repo and drag its downstream-obligation clauses along with it.
+models/sherpa-supertonic-3/
+
 # External repo, cloned by scripts/setup_common.sh, not committed
 external/
 

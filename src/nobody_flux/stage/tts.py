@@ -385,3 +385,141 @@ class SherpaMatchaTts:
         directly, which is exactly what the streaming playback queue wants."""
         audio = self.tts.generate(text, sid=self.speaker_id, speed=self.speed)
         return np.ascontiguousarray(audio.samples, dtype=np.float32), int(audio.sample_rate)
+
+
+DEFAULT_SUPERTONIC_DIR = PROJECT_ROOT / "models" / "sherpa-supertonic-3"
+
+
+@dataclass
+class SherpaSupertonicTts:
+    """TTS candidate: Supertone's Supertonic 3 via sherpa-onnx.
+
+    Reaches this project through the same `sherpa_onnx.OfflineTts` API family as
+    SherpaMatchaTts, so it needs no subprocess, no isolated venv, and no
+    dependency bump -- `OfflineTtsSupertonicModelConfig` is already present in
+    the pinned sherpa-onnx 1.13.4 (verified by introspection, not by release
+    notes: the `unicode_indexer` and `voice_style` fields are the Supertonic 3
+    signature).
+
+    ## Why this is interesting: no G2P
+
+    Every other Korean TTS route in this project runs into the Korean
+    grapheme-to-phoneme problem, and the survey of that landscape is bleak --
+    the g2pK family all import mecab in __init__, KoG2P and KoNLPy are GPL,
+    KoNLPy additionally wants a JVM, and pynini (so NeMo) publishes no aarch64
+    wheel. SherpaMatchaTts sidesteps it only by borrowing the English preset's
+    espeak-ng-data, which this project would rather not depend on (GPL-3.0 plus
+    a C dependency, and weak Korean rules).
+
+    Supertonic needs none of it. The paper states the model "operates directly
+    on raw character-level text and employs cross-attention for text-speech
+    alignment, thus eliminating the need for grapheme-to-phoneme (G2P) modules
+    and external aligners" (arXiv 2503.23108), and the shipped assets agree:
+    there is no tokens.txt and no phoneme inventory, only `unicode_indexer.bin`.
+
+    Correspondingly there is **no language parameter**. `tts.json` reports
+    `n_langs: 0` and `lang_emb_dim: 0` for both the text encoder and the vector
+    field, so the model has no language conditioning at all -- the language is
+    implicit in the characters. Hangul in, Korean out. That also means the
+    `--lang` flag in sherpa-onnx's CLI docs has no analogue here, and
+    `generate()` accepts only (text, sid, speed).
+
+    ## What it does NOT solve
+
+    G2P-free is not text-normalization-free. Nothing in this path expands
+    digits or Latin letters, so "3시" is undefined behaviour -- the model may
+    read the character or skip it. That job still belongs to the caller (today,
+    to persona.py's prompt instruction).
+
+    ## Licensing -- read this before shipping
+
+    The bundled `LICENSE` in the sherpa-onnx redistribution is **MIT, and that
+    is the license of Supertone's sample *code*, not of these weights.** The
+    upstream README shipped in the same directory says plainly: "The
+    accompanying model is released under the OpenRAIL-M License." So the file
+    sitting next to the .onnx files understates the obligations, which is
+    exactly the trap docs/llm-conversational-selection.md warns about ("do not
+    take a license from a quantizer's repo or from memory").
+
+    OpenRAIL-M (BigScience, 2022-08-18) does permit commercial use royalty-free,
+    but it carries use-based restrictions that **must be passed downstream as an
+    enforceable provision**. Three are directly relevant to a voice companion:
+    undisclosed machine-generated content requires a clear disclaimer;
+    impersonation/deepfakes without consent are prohibited; and providing
+    medical advice is prohibited. Adopting this preset is a product decision,
+    not just a technical one.
+
+    ## Measured, on this project's Windows CPU box (NOBODY_CPU_BUDGET=4)
+
+    10 speakers, 44100 Hz. Intelligibility by ASR round-trip (synthesize, then
+    transcribe with SenseVoice, then CER against the input) over 6 Korean
+    sentences, numbers excluded because SenseVoice applies inverse text
+    normalization and writes "3 시 20 분" for a correctly-spoken "세 시 이십 분":
+
+        sid=7  CER 0.025   <- best; ties sherpa-matcha-ko
+        sid=0  CER 0.038      (the naive default is not the best voice)
+        sid=2  CER 0.089   <- worst
+        sherpa-matcha-ko      CER 0.025, RTF 0.31
+
+    So it matches the incumbent on intelligibility at its best voice and is
+    consistently ~1.7x slower (RTF 0.41-0.62 vs 0.31). Treat the CER ordering
+    among the good voices as noise: 6 sentences is ~150 reference characters, so
+    0.025 vs 0.038 is a two-character difference.
+
+    Its real advantages over sherpa-matcha-ko are not in that table: ten voices
+    instead of one (and tts.py's DEFAULT reference voice is flagged as a
+    placeholder to replace before anything user-facing), and a documented
+    provenance -- the Korean Matcha checkpoint is a hand-copied community model
+    that no setup script can download.
+    """
+
+    duration_predictor: Path = DEFAULT_SUPERTONIC_DIR / "duration_predictor.int8.onnx"
+    text_encoder: Path = DEFAULT_SUPERTONIC_DIR / "text_encoder.int8.onnx"
+    vector_estimator: Path = DEFAULT_SUPERTONIC_DIR / "vector_estimator.int8.onnx"
+    vocoder: Path = DEFAULT_SUPERTONIC_DIR / "vocoder.int8.onnx"
+    tts_json: Path = DEFAULT_SUPERTONIC_DIR / "tts.json"
+    unicode_indexer: Path = DEFAULT_SUPERTONIC_DIR / "unicode_indexer.bin"
+    voice_style: Path = DEFAULT_SUPERTONIC_DIR / "voice.bin"
+    num_threads: int = 2
+    # CPU-only for the same reason as SherpaMatchaTts: there is no CUDA-capable
+    # onnxruntime build wired up for sherpa_onnx in this project.
+    provider: str = "cpu"
+    # Not 0. sid=0 measured worse than sid=7 on the ASR round-trip, and picking
+    # the first index by default would have quietly shipped a mid-table voice.
+    speaker_id: int = 7
+    speed: float = 1.0
+
+    def __post_init__(self):
+        supertonic_config = sherpa_onnx.OfflineTtsSupertonicModelConfig(
+            duration_predictor=str(self.duration_predictor),
+            text_encoder=str(self.text_encoder),
+            vector_estimator=str(self.vector_estimator),
+            vocoder=str(self.vocoder),
+            tts_json=str(self.tts_json),
+            unicode_indexer=str(self.unicode_indexer),
+            voice_style=str(self.voice_style),
+        )
+        model_config = sherpa_onnx.OfflineTtsModelConfig(
+            supertonic=supertonic_config,
+            num_threads=self.num_threads,
+            provider=self.provider,
+        )
+        self.tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=model_config))
+
+    def synthesize(self, text: str, out_path: str) -> str:
+        """Synthesize `text` to a wav at `out_path`, at the model's own 44100Hz.
+
+        Note the rate: this is the highest-rate TTS in the project (Matcha is
+        22050), so the streaming playback path resamples more per chunk. See
+        audio/resample.py -- linear, deliberately.
+        """
+        samples, sr = self.synthesize_audio(text)
+        sf.write(out_path, samples, samplerate=sr)
+        return out_path
+
+    def synthesize_audio(self, text: str) -> tuple[np.ndarray, int]:
+        """In-process native path, mono float32 -- same contract as every other
+        TTS class here, so the sentence-chunk playback queue needs no special
+        case for this preset."""
+        audio = self.tts.generate(text, sid=self.speaker_id, speed=self.speed)
+        return np.ascontiguousarray(audio.samples, dtype=np.float32), int(audio.sample_rate)

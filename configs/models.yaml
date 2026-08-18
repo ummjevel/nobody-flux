@@ -256,3 +256,39 @@ tts:
       vocoder: models/sherpa-matcha-ko/vocos-22khz-univ.onnx
       tokens: models/sherpa-matcha-ko/tokens.txt
       data_dir: models/sherpa-matcha-en/espeak-ng-data
+
+  # Supertone's Supertonic 3, via the same in-process sherpa_onnx.OfflineTts
+  # family -- no dependency bump needed, OfflineTtsSupertonicModelConfig is
+  # already in the pinned sherpa-onnx 1.13.4. See SherpaSupertonicTts's
+  # docstring in src/nobody_flux/stage/tts.py for the measurements.
+  #
+  # Notice what is NOT here: no tokens, no data_dir, no espeak-ng. Supertonic
+  # is character-level (arXiv 2503.23108) and has no language conditioning at
+  # all (tts.json: n_langs 0), so Hangul text needs no G2P and there is no
+  # --lang to set. That is this preset's main structural advantage over
+  # sherpa-matcha-ko, which reaches Korean only by borrowing the English
+  # preset's espeak-ng-data.
+  #
+  # 44100Hz -- the highest-rate TTS here (Matcha is 22050), so the streaming
+  # playback path resamples more per chunk.
+  #
+  # LICENSE, and this one matters. The LICENSE file shipped INSIDE the
+  # sherpa-onnx model bundle says MIT, and that is WRONG for the weights --
+  # it is Supertone's license for their sample *code*. The upstream README in
+  # the same directory states: "The accompanying model is released under the
+  # OpenRAIL-M License."
+  #   verified at: https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE
+  #                (BigScience OpenRAIL-M, 2022-08-18)
+  # Commercial use IS permitted royalty-free, but the use-based restrictions
+  # MUST be passed downstream as an enforceable provision, and three of them
+  # bear on a voice companion directly: undisclosed machine-generated content
+  # requires a clear disclaimer, impersonation/deepfakes without consent are
+  # prohibited, and providing medical advice is prohibited.
+  # This is a product/legal decision, not only a technical one -- which is why
+  # this is a preset to compare against and not the default.
+  supertonic-3-ko:
+    class: SherpaSupertonicTts
+    params:
+      # sid=7 measured best of the 10 voices on the ASR round-trip; sid=0 is
+      # mid-table. Do not assume the first index is the good one.
+      speaker_id: 7

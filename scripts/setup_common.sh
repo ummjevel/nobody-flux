@@ -36,6 +36,11 @@
 #      --endpoint-detect; see that module's docstring)
 #  11. download the streaming Zipformer Korean ASR model (third ASR candidate,
 #      src/nobody_flux/asr.py's StreamingZipformerAsr docstring)
+#  12. download Supertonic 3 TTS (fourth TTS candidate, see
+#      src/nobody_flux/stage/tts.py's SherpaSupertonicTts docstring -- Korean
+#      capable, character-level so no G2P/espeak needed, but its weights are
+#      OpenRAIL-M rather than permissive; kept as a comparison preset, not the
+#      default)
 #
 # NOTE on WSL2/drvfs (/mnt/c/...) checkouts: both external/ clones above
 # involve either heavy Python package imports (MOSS-TTS-Nano) or a multi-file
@@ -59,10 +64,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/11: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/12: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/11: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/12: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -75,7 +80,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/11: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/12: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -89,7 +94,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/11: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/12: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -117,7 +122,7 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
 
-echo "== [$TARGET_LABEL] 5/11: VibeASR.cpp (ASR candidate, compiled binary) =="
+echo "== [$TARGET_LABEL] 5/12: VibeASR.cpp (ASR candidate, compiled binary) =="
 VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
 if [ ! -d "$VIBEASR_DIR" ]; then
     echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
@@ -177,7 +182,7 @@ for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
     fi
 done
 
-echo "== [$TARGET_LABEL] 6/11: FreyaTTS (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 6/12: FreyaTTS (external, isolated venv) =="
 FREYATTS_VENV_DIR="$PROJECT_ROOT/external/freyatts-venv"
 if [ ! -x "$FREYATTS_VENV_DIR/bin/python" ]; then
     echo "Creating FreyaTTS's own venv (kept separate -- freyatts's own torch"
@@ -197,7 +202,7 @@ if [ ! -f "$PROJECT_ROOT/models/freyatts-ko-voiceA/model.safetensors" ]; then
     echo "the freyatts-ko-voicea TTS preset."
 fi
 
-echo "== [$TARGET_LABEL] 7/11: sherpa-onnx Matcha-TTS (English, comparison only) =="
+echo "== [$TARGET_LABEL] 7/12: sherpa-onnx Matcha-TTS (English, comparison only) =="
 MATCHA_DIR="$PROJECT_ROOT/models/sherpa-matcha-en"
 if [ ! -f "$MATCHA_DIR/model-steps-3.onnx" ]; then
     echo "Downloading matcha-icefall-en_US-ljspeech (~71MB acoustic model + tokens + espeak-ng-data)..."
@@ -218,7 +223,7 @@ else
     echo "Vocoder already present, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 8/11: TEN-VAD model =="
+echo "== [$TARGET_LABEL] 8/12: TEN-VAD model =="
 TEN_VAD_DIR="$PROJECT_ROOT/models/ten-vad"
 if [ ! -f "$TEN_VAD_DIR/ten-vad.onnx" ]; then
     echo "Downloading ten-vad.onnx (~330KB)..."
@@ -229,7 +234,7 @@ else
     echo "Already present at $TEN_VAD_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 9/11: LLM weights (GGUF) =="
+echo "== [$TARGET_LABEL] 9/12: LLM weights (GGUF) =="
 # Mi:dm 2.0 Mini is the DEFAULT preset (configs/models.yaml), chosen by
 # measuring conversational behaviour rather than benchmark scores -- see
 # docs/llm-conversational-selection.md. MIT licensed, Korean-first, built for
@@ -255,7 +260,7 @@ else
     echo "Already present at $GGUF_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 10/11: Smart Turn v3 endpoint detector (optional) =="
+echo "== [$TARGET_LABEL] 10/12: Smart Turn v3 endpoint detector (optional) =="
 SMART_TURN_DIR="$PROJECT_ROOT/models/smart-turn-v3"
 if [ ! -f "$SMART_TURN_DIR/smart-turn-v3.2-cpu.onnx" ]; then
     echo "Downloading smart-turn-v3.2-cpu.onnx (~8.7MB, pipecat-ai, BSD-2)..."
@@ -266,7 +271,7 @@ else
     echo "Already present at $SMART_TURN_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 11/11: streaming Zipformer Korean ASR (third ASR candidate) =="
+echo "== [$TARGET_LABEL] 11/12: streaming Zipformer Korean ASR (third ASR candidate) =="
 ZIPFORMER_DIR="$PROJECT_ROOT/models/streaming-zipformer-ko"
 if [ ! -f "$ZIPFORMER_DIR/encoder-epoch-99-avg-1.int8.onnx" ]; then
     echo "Downloading sherpa-onnx-streaming-zipformer-korean-2024-06-16 (~60MB int8)..."
@@ -278,6 +283,27 @@ if [ ! -f "$ZIPFORMER_DIR/encoder-epoch-99-avg-1.int8.onnx" ]; then
     rm -f "$TMP_TAR"
 else
     echo "Already present at $ZIPFORMER_DIR, skipping."
+fi
+echo "== [$TARGET_LABEL] 12/12: Supertonic 3 TTS (fourth TTS candidate) =="
+# Korean-capable and character-level (no G2P, no espeak-ng-data), and already
+# supported by the pinned sherpa-onnx -- OfflineTtsSupertonicModelConfig is in
+# 1.13.4, so this needs no dependency bump.
+#
+# LICENSE: the LICENSE file inside this tarball says MIT, which is Supertone's
+# license for their sample *code*. The README shipped alongside it states the
+# model itself is OpenRAIL-M -- commercial use is allowed royalty-free, but the
+# use-based restrictions must be passed to downstream users. See the preset
+# comment in configs/models.yaml before shipping anything built on it.
+SUPERTONIC_DIR="$PROJECT_ROOT/models/sherpa-supertonic-3"
+if [ ! -f "$SUPERTONIC_DIR/vector_estimator.int8.onnx" ]; then
+    echo "Downloading sherpa-onnx-supertonic-3-tts-int8-2026-05-11 (~123MB, 31 languages, 10 speakers)..."
+    TMP_TAR="$(mktemp --suffix=.tar.bz2)"
+    curl -L -o "$TMP_TAR"         "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2"
+    mkdir -p "$SUPERTONIC_DIR"
+    tar xjf "$TMP_TAR" -C "$SUPERTONIC_DIR" --strip-components=1
+    rm -f "$TMP_TAR"
+else
+    echo "Already present at $SUPERTONIC_DIR, skipping."
 fi
 
 echo "== [$TARGET_LABEL] setup complete =="

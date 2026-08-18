@@ -357,3 +357,258 @@ class StreamingTranscriber:
         for offset in range(0, len(audio), frame_samples):
             self.accept_frame(audio[offset : offset + frame_samples], sample_rate)
         return self.finalize()
+
+
+DEFAULT_SENSE_VOICE_DIR = PROJECT_ROOT / "models" / "sense-voice"
+
+
+def should_decode(
+    buffered_samples: int,
+    samples_at_last_decode: int,
+    min_decode_s: float,
+    hop_s: float,
+    sample_rate: int = SAMPLE_RATE,
+) -> bool:
+    """Whether enough audio has arrived to be worth another full re-decode.
+
+    Pulled out as a free function for the same reason ``longest_common_prefix``
+    was: it is the entire substance of the chunking policy, it decides both the
+    CPU cost and the partial-transcript latency, and it deserves to be testable
+    on plain integers with no model, weights or audio anywhere near it.
+
+    The two gates are not symmetric. ``min_decode_s`` is an absolute floor
+    below which a decode is worse than useless -- SenseVoice returns nothing for
+    very short input, and *two* empty hypotheses in a row would agree with each
+    other and let LocalAgreement commit the empty string. ``hop_s`` is the
+    recurring interval after that.
+
+    A consequence worth knowing before tuning either: the earliest a prefix can
+    possibly be committed is ``min_decode_s + hop_s`` (one decode to form a
+    hypothesis, one more to agree with it at the default agreement_n=2).
+    Measured at the defaults that is ~1.29s, which is longer than most turns in
+    this project's own capture set -- so utterances shorter than that never
+    produce a partial at all.
+    """
+    if buffered_samples < int(min_decode_s * sample_rate):
+        return False
+    return (buffered_samples - samples_at_last_decode) >= int(hop_s * sample_rate)
+
+
+@dataclass
+class ChunkedSenseVoiceTranscriber:
+    """Streaming transcripts from SenseVoice, which is not a streaming model.
+
+    ## Why this exists
+
+    ``StreamingTranscriber`` above is the architecturally correct answer -- a
+    real streaming transducer, native Korean, built-in endpointing. It does not
+    work. On clean test wavs it matches the batch path exactly (similarity 1.00
+    via scripts/_smoke_turn.py); on real microphone captures it returns the empty
+    string. docs/FEATURES.md records ruling out level (16x amplification still
+    empty), noise (clean speech fine at SNR 5dB), lead-in, and length, and the
+    *batch* path of the same checkpoint fails identically while SenseVoice reads
+    the same audio fine. So the wiring is right and the checkpoint is wrong.
+
+    It is not our bug to fix, either: sherpa-onnx issue #2886 reports the same
+    symptom ("always returns empty string") for the Korean streaming models, was
+    opened 2025-12-10, is still open with no maintainer fix, and attributes it to
+    a malformed encoder ONNX export. Waiting on that is not a plan.
+
+    docs/FEATURES.md left two options -- find another Korean streaming
+    checkpoint, or run SenseVoice in chunks. This is the second one.
+
+    ## What it does
+
+    Accumulate the utterance, and every ``hop_s`` of *new* audio re-decode the
+    whole thing from the start with the offline recognizer, feeding each result
+    to the same ``LocalAgreementStabilizer`` the transducer path uses. Two
+    consecutive decodes agreeing on a prefix commits it.
+
+    Re-decoding from the start every hop, rather than decoding each chunk
+    independently and concatenating, is the whole point. SenseVoice is a
+    non-autoregressive encoder over the full input; a chunk decoded in isolation
+    has no left context, and the measurements in docs/FEATURES.md show this
+    checkpoint needs roughly 2.8s of audio before it recognizes an utterance
+    completely and returns nothing at all below ~0.5s. Independent chunks would
+    therefore be individually unreadable no matter how they were stitched.
+
+    ## The cost, stated plainly
+
+    That makes decode work quadratic in utterance length: an N-second utterance
+    is decoded N/hop_s times, over a mean of N/2 seconds each. This is the
+    central thing to measure before adopting it -- see scripts/_ab_asr.py. On a
+    CM4 it may simply be unaffordable, in which case the honest outcome is a
+    recorded number and no adoption. ``max_buffer_s`` bounds the worst case.
+
+    ## What is lost relative to the transducer path
+
+    ``endpoint_detected`` is always False. SenseVoice has no decoder state and
+    therefore no endpointing of its own, so the deliberate dual-endpointing
+    design documented at the top of this module -- the recognizer's decoder
+    endpointing *and* TEN-VAD's acoustic endpointing, arbitrated by the
+    controller -- loses one of its two signals here. Turn ends fall entirely to
+    TEN-VAD and Smart Turn. That is a real reduction: the two disagreed usefully,
+    the decoder holding on through a mid-word pause where TEN-VAD cuts.
+
+    Also inherited from the batch path: this checkpoint's Korean tokenization
+    inserts spurious mid-eojeol spaces, which is why LocalAgreement here compares
+    characters rather than words (see ``longest_common_prefix``).
+    """
+
+    model_dir: Path = DEFAULT_SENSE_VOICE_DIR
+    use_int8: bool = True
+    language: str = "ko"
+    # Inverse text normalization ON, matching the batch NobodyASR preset so the
+    # two paths produce comparable text. Note this is what makes the recognizer
+    # write digits for spoken numerals -- see scripts/_ab_tts.py, where that
+    # behaviour had to be excluded from a CER aggregate.
+    use_itn: bool = True
+    num_threads: int = 2
+
+    agreement_n: int = 2
+
+    # How much new audio to accumulate before re-decoding. 0.48s = 16 frames of
+    # 30ms, so it lands on a frame boundary and never splits one. Smaller means
+    # fresher partials and more CPU; given the quadratic cost above, this is the
+    # main dial for the latency/compute trade.
+    hop_s: float = 0.48
+    # Below this, do not decode at all. FEATURES.md measured that this
+    # checkpoint returns nothing for a 0.5s utterance and only a partial at
+    # 0.8s, so decoding earlier spends CPU to produce an empty hypothesis --
+    # and an empty hypothesis is not harmless: two of them in a row would agree
+    # with each other and commit the empty string as a prefix.
+    min_decode_s: float = 0.8
+    # Hard cap, mirroring configs/vad.yaml's max_speech_duration. A stuck mic
+    # must not be able to grow an unbounded buffer *and* a quadratic decode
+    # cost at the same time.
+    max_buffer_s: float = 20.0
+
+    def __post_init__(self) -> None:
+        model_file = "model.int8.onnx" if self.use_int8 else "model.onnx"
+        self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=str(self.model_dir / model_file),
+            tokens=str(self.model_dir / "tokens.txt"),
+            num_threads=self.num_threads,
+            language=self.language,
+            use_itn=self.use_itn,
+        )
+        self._stabilizer = LocalAgreementStabilizer(agreement_n=self.agreement_n)
+        self._buffer: list[np.ndarray] = []
+        self._buffered_samples = 0
+        self._samples_at_last_decode = 0
+        self.decode_count = 0
+        self.decoded_samples_total = 0
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def reset(self) -> None:
+        self._stabilizer.reset()
+        self._buffer = []
+        self._buffered_samples = 0
+        self._samples_at_last_decode = 0
+        # decode_count / decoded_samples_total deliberately survive a reset:
+        # they are cost instrumentation for a whole session, not per-utterance
+        # state. scripts/_ab_asr.py reads them to report the quadratic penalty.
+
+    def accept_frame(self, frame: np.ndarray, sample_rate: int = SAMPLE_RATE) -> None:
+        # Validated, not resampled -- same rule as StreamingTranscriber above.
+        # The capture path is fixed at 16kHz, so a mismatch here is a wiring bug
+        # and silently correcting it would hide the bug while changing the
+        # audio the recognizer was tuned on.
+        if sample_rate != SAMPLE_RATE:
+            raise ValueError(
+                f"ChunkedSenseVoiceTranscriber expects {SAMPLE_RATE}Hz audio, got "
+                f"{sample_rate}Hz. The capture path is fixed at 16kHz (see "
+                "audio/session.py); resample before calling if that ever changes."
+            )
+
+        frame = np.asarray(frame, dtype=np.float32)
+        if frame.ndim > 1:
+            frame = frame.mean(axis=1)
+
+        cap = int(self.max_buffer_s * SAMPLE_RATE)
+        if self._buffered_samples >= cap:
+            # Drop rather than grow. Losing the tail of a 20s monologue is worse
+            # than the alternative only in theory; in practice the turn is
+            # already past any useful length, and the decode cost is the thing
+            # that will actually break the session.
+            return
+
+        self._buffer.append(frame)
+        self._buffered_samples += len(frame)
+
+        if should_decode(
+            self._buffered_samples,
+            self._samples_at_last_decode,
+            self.min_decode_s,
+            self.hop_s,
+        ):
+            self._decode_buffer()
+
+    def _decode_buffer(self) -> None:
+        audio = np.concatenate(self._buffer) if self._buffer else np.zeros(0, np.float32)
+        self._samples_at_last_decode = self._buffered_samples
+        self.decode_count += 1
+        self.decoded_samples_total += len(audio)
+        self._stabilizer.observe(self._decode(audio))
+
+    def _decode(self, audio: np.ndarray) -> str:
+        """One offline decode of `audio`. A fresh stream every time.
+
+        The recognizer is stateless across streams by design, which is exactly
+        why re-decoding from the start is possible at all -- but it also means
+        there is nothing to incrementally reuse, hence the quadratic cost.
+        """
+        if len(audio) == 0:
+            return ""
+        stream = self.recognizer.create_stream()
+        stream.accept_waveform(SAMPLE_RATE, audio)
+        self.recognizer.decode_stream(stream)
+        return " ".join(stream.result.text.split())
+
+    # -- readouts ----------------------------------------------------------
+
+    @property
+    def committed(self) -> str:
+        return self._stabilizer.committed
+
+    @property
+    def hypothesis(self) -> str:
+        return self._stabilizer.hypothesis
+
+    @property
+    def endpoint_detected(self) -> bool:
+        """Always False -- see the class docstring. SenseVoice has no decoder
+        state to endpoint on, so ending the turn is entirely TEN-VAD's and Smart
+        Turn's job under this transcriber."""
+        return False
+
+    def finalize(self) -> str:
+        """Decode everything once more and treat the result as settled.
+
+        The final decode is unconditional, even if a hop just ran, because the
+        last partial hop of audio is often where the sentence-final ending lives
+        -- and in Korean that is the most informative part of the utterance.
+        """
+        if self._buffered_samples == 0:
+            return self._stabilizer.committed
+        audio = np.concatenate(self._buffer)
+        self.decode_count += 1
+        self.decoded_samples_total += len(audio)
+        text = self._decode(audio)
+        self._stabilizer.force_commit(text)
+        return text
+
+    def transcribe_array(
+        self, audio: np.ndarray, sample_rate: int = SAMPLE_RATE, frame_samples: int = 480
+    ) -> str:
+        """Replay a complete utterance through the live path -- same contract and
+        same rationale as StreamingTranscriber.transcribe_array, so a recorded
+        wav exercises the real incremental code rather than a parallel batch one."""
+        self.reset()
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        for offset in range(0, len(audio), frame_samples):
+            self.accept_frame(audio[offset : offset + frame_samples], sample_rate)
+        return self.finalize()

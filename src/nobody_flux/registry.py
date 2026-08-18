@@ -46,6 +46,7 @@ _CLASSES: dict[str, type] = {
     "NobodyTTS": tts.NobodyTTS,
     "FreyaTtsKo": tts.FreyaTtsKo,
     "SherpaMatchaTts": tts.SherpaMatchaTts,
+    "SherpaSupertonicTts": tts.SherpaSupertonicTts,
 }
 
 
@@ -252,27 +253,70 @@ def build_audio_session(backend: str | None = None) -> audio_session.AudioSessio
 def build_streaming_transcriber(**overrides):
     """Build the Phase 3 live recognizer from configs/streaming_asr.yaml.
 
-    Same flat-config pattern as build_vad/build_turn_detector -- there is one
-    streaming implementation, so this is a config's worth of knobs rather than
-    a named preset. Kept separate from the `asr` presets in models.yaml on
-    purpose: those are batch, file-in/text-out stages that benchmark.py
-    compares against each other, while this consumes a live frame stream and
-    cannot be substituted for one. Conflating them would put an object in the
-    preset table that half the callers could not actually use.
+    Same flat-config pattern as build_vad/build_turn_detector -- a config's
+    worth of knobs rather than a named preset. Kept separate from the `asr`
+    presets in models.yaml on purpose: those are batch, file-in/text-out stages
+    that benchmark.py compares against each other, while this consumes a live
+    frame stream and cannot be substituted for one. Conflating them would put an
+    object in the preset table that half the callers could not actually use.
+
+    There are now two engines, selected by the yaml's `engine` key, and they are
+    not interchangeable in quality -- see configs/streaming_asr.yaml for which
+    to use and why. They share the `accept_frame`/`committed`/`hypothesis`/
+    `endpoint_detected`/`finalize` contract, so callers need no branch; the one
+    behavioural difference is that `chunked-sensevoice` never reports an
+    endpoint of its own.
 
     Imported lazily so that merely importing registry does not construct a
-    sherpa-onnx online recognizer for the majority of callers who never enable
+    sherpa-onnx recognizer for the majority of callers who never enable
     streaming ASR.
     """
     from .stage import asr_stream
 
     config = _load_yaml(STREAMING_ASR_CONFIG_PATH)
     config.update(overrides)
-    # model_dir is written relative to the project root in the yaml, the same
-    # convention _build() applies to preset params.
-    if "model_dir" in config:
-        config["model_dir"] = PROJECT_ROOT / config["model_dir"]
-    return asr_stream.StreamingTranscriber(**config)
+
+    # A fixed allowlist rather than getattr-by-string, for the same reason
+    # _CLASSES above is one: a typo'd or hostile engine name in the yaml must
+    # not be able to reach for something unrelated.
+    engines = {
+        "zipformer": asr_stream.StreamingTranscriber,
+        "chunked-sensevoice": asr_stream.ChunkedSenseVoiceTranscriber,
+    }
+    engine = config.pop("engine", "zipformer")
+    cls = _lookup(engines, engine, "streaming ASR engine")
+
+    # Shared knobs live at the top level; each engine's own knobs live in a
+    # block named after it. Only the selected engine's block is merged in, and
+    # the others are dropped rather than unioned -- both engines have a
+    # `model_dir` field pointing at different checkpoints, so unioning them let
+    # the zipformer path's model_dir reach the SenseVoice constructor. That
+    # happened, and it is the shape of bug that loads the wrong weights quietly
+    # somewhere else.
+    engine_params = {}
+    for name in engines:
+        block = config.pop(name, None) or {}
+        if name == engine:
+            engine_params = block
+    params = {**config, **engine_params}
+
+    if "model_dir" in params:
+        # Written relative to the project root in the yaml, the same convention
+        # _build() applies to preset params.
+        params["model_dir"] = PROJECT_ROOT / params["model_dir"]
+
+    # A shared key the selected engine has no field for is a config error worth
+    # reporting, not something to silently drop -- silently dropping is how
+    # `rule2_min_trailing_silence` would appear to be tuned while doing nothing.
+    accepted = set(getattr(cls, "__dataclass_fields__", {}))
+    unknown = sorted(set(params) - accepted)
+    if unknown:
+        raise ValueError(
+            f"configs/streaming_asr.yaml sets {unknown} which "
+            f"{cls.__name__} (engine: {engine}) has no field for. Move them "
+            f"under the engine block they belong to, or remove them."
+        )
+    return cls(**params)
 
 
 def build_turn_detector(**overrides) -> turn_detector.TurnDetector:

@@ -147,7 +147,7 @@ function Get-File {
     $ProgressPreference = $previous
 }
 
-$total = if ($SkipModels) { 3 } else { 9 }
+$total = if ($SkipModels) { 3 } else { 10 }
 
 # --- 1. uv ------------------------------------------------------------------
 
@@ -257,9 +257,27 @@ Until then, run with --tts sherpa-matcha-en, which this script did install.
 "@
 }
 
-# --- 9. verify --------------------------------------------------------------
+Write-Step 9 $total "Supertonic 3 TTS (comparison preset)"
+# Korean-capable, character-level (no G2P, no espeak-ng-data), and already
+# supported by the pinned sherpa-onnx -- OfflineTtsSupertonicModelConfig ships
+# in 1.13.4, so no dependency bump is needed for this.
+#
+# LICENSE: the LICENSE file inside the tarball reads MIT, but that is
+# Supertone's license for their sample *code*; the README beside it states the
+# model is OpenRAIL-M. Commercial use is permitted royalty-free, and the
+# use-based restrictions must be passed downstream. See configs/models.yaml.
+#
+# Not the default: measured on this platform it ties sherpa-matcha-ko on
+# intelligibility and is roughly twice as slow (see the SherpaSupertonicTts
+# docstring for the numbers).
+Get-Sherpa -Label 'sherpa-onnx-supertonic-3-tts-int8 (~123MB, 31 langs, 10 speakers)' `
+    -Url 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2' `
+    -Destination (Join-Path $ProjectRoot 'models\sherpa-supertonic-3') `
+    -Marker 'vector_estimator.int8.onnx'
 
-Write-Step 9 $total "verifying"
+# --- 10. verify -------------------------------------------------------------
+
+Write-Step 10 $total "verifying"
 & $VenvPython (Join-Path $ProjectRoot 'scripts\_smoke_imports.py')
 if ($LASTEXITCODE -ne 0) { throw "import smoke test failed" }
 

@@ -1,49 +1,124 @@
-# Tunable parameters for src/nobody_flux/stage/asr_stream.py's
-# StreamingTranscriber -- the Phase 3 live recognizer that decodes while the
-# user is still speaking, instead of transcribing a recorded wav afterwards.
+# Tunable parameters for src/nobody_flux/stage/asr_stream.py's live recognizers
+# -- the Phase 3 path that decodes while the user is still speaking, instead of
+# transcribing a recorded wav afterwards.
 #
 # Same "change a value here, no code edit" pattern as vad.yaml and
 # turn_detector.yaml. Used only by scripts/talk.py's --streaming-asr; the batch
 # ASR presets in models.yaml are unaffected.
 #
-# See the StreamingTranscriber docstring for what each field does and why its
-# default is what it is.
+# Structure: shared knobs at the top level, engine-specific knobs in a block
+# named after the engine. The blocks are NOT merged together -- only the
+# selected engine's block is read. That is deliberate: both engines have a
+# `model_dir` field pointing at different checkpoints, and a flat file let the
+# zipformer path's model_dir reach the SenseVoice constructor, which then tried
+# to load SenseVoice weights out of the zipformer directory. It failed loudly
+# here; it is the kind of thing that loads the wrong weights quietly elsewhere.
 
-model_dir: models/streaming-zipformer-ko
+# === engine ===================================================================
+# Two implementations, and they are NOT equivalent in quality.
+#
+#   zipformer            k2-fsa's streaming Zipformer transducer. The
+#                        architecturally correct choice -- a real streaming model
+#                        with its own endpointing. It DOES NOT WORK on real
+#                        microphone speech: it returns the empty string.
+#                        Measured 14 of 16 real captures empty, against
+#                        SenseVoice reading all 16 (docs/FEATURES.md, and
+#                        sherpa-onnx issue #2886 -- open since 2025-12-10 with no
+#                        maintainer fix, attributed to a malformed encoder ONNX
+#                        export, so not ours to fix). Kept so the failure stays
+#                        reproducible rather than becoming folklore.
+#
+#   chunked-sensevoice   Re-decodes the growing utterance with the offline
+#                        SenseVoice recognizer every `hop_s`, stabilized by the
+#                        same LocalAgreement rule. Final text is identical to the
+#                        batch path (CER 0.000 over the capture set) and it never
+#                        returns empty where batch does not. Its costs are real
+#                        and measured -- see its block below.
+#
+# DEFAULT is chunked-sensevoice: between an engine that is silent on real speech
+# and one that is merely late, late wins.
+engine: chunked-sensevoice
+
+# === shared ===================================================================
 use_int8: true
 num_threads: 2
 
 # --- LocalAgreement stabilization -------------------------------------------
 # How many consecutive decoder hypotheses must agree before their common prefix
-# is treated as committed (i.e. safe to act on, guaranteed never to be
-# retracted). 2 matches whisper-streaming's default: it eliminates the great
-# majority of retractions at the cost of one decoder update's delay. Raising it
-# trades commit latency for stability, roughly one frame period per increment.
+# is treated as committed (i.e. safe to act on, guaranteed never to shrink). 2
+# matches whisper-streaming's default: it eliminates the great majority of
+# retractions at the cost of one decoder update's delay. Raising it trades commit
+# latency for stability, roughly one hop per increment.
 agreement_n: 2
 
-# --- Endpoint detection -----------------------------------------------------
-# The recognizer's own endpointing, which decides an utterance is over from
-# decoder state rather than from raw acoustic energy the way TEN-VAD does. Both
-# signals run; turn/controller.py arbitrates. Keeping this enabled costs
-# nothing and gives the controller a second opinion that fails differently.
-enable_endpoint_detection: true
+# === chunked-sensevoice =======================================================
+chunked-sensevoice:
+  # How much NEW audio to accumulate before re-decoding the whole utterance from
+  # the start. Every hop costs a full decode of everything so far, which makes
+  # total decode work quadratic in utterance length -- measured 3.0x
+  # amplification (76s of audio decoded for 25s of input) at these defaults,
+  # wall RTF 0.21 on a 4-core proxy. Shrinking this buys fresher partials and
+  # costs CPU; on a CM4 the RTF headroom is much smaller, so measure before
+  # lowering it.
+  hop_s: 0.48
 
-# Trailing silence to end a turn when nothing has been decoded yet -- the
-# "stream opened but the user never really spoke" timeout. sherpa-onnx's own
-# default; kept generous because firing early here cuts off someone who merely
-# paused before starting.
-rule1_min_trailing_silence: 2.4
+  # Absolute floor before the first decode. SenseVoice returns nothing for very
+  # short input (measured: empty at 0.5s, partial at 0.8s), and two empty
+  # hypotheses in a row would agree with each other and let LocalAgreement commit
+  # the empty string -- which is monotonic and cannot be taken back.
+  min_decode_s: 0.8
 
-# Trailing silence after something HAS been decoded. This is the one that
-# governs conversational responsiveness, and sherpa-onnx's 1.2s default is much
-# too slow -- a listener reads a 1.2s gap as the other person having finished.
-# 0.6s sits just above vad.yaml's min_silence_duration (0.5s), so TEN-VAD (the
-# tighter, already mic-tuned signal) normally ends the turn first and this acts
-# as a backstop rather than the primary. ESTIMATED, not yet measured on a real
-# microphone -- confirm it the same way vad.yaml's threshold was, with
-# scripts/_debug_vad_mic.py and _calibrate_turn_params.py.
-rule2_min_trailing_silence: 0.6
+  # Hard cap on one utterance, mirroring vad.yaml's max_speech_duration. Bounds
+  # the quadratic cost when a mic gets stuck.
+  max_buffer_s: 20.0
 
-# Hard cap on one utterance. Mirrors vad.yaml's max_speech_duration so neither
-# component can hold a turn open on its own.
-rule3_min_utterance_length: 20.0
+  # KNOWN LIMIT, measured. Do not try to tune around it: the earliest a prefix
+  # can be committed is min_decode_s + hop_s = ~1.28s (one decode to form a
+  # hypothesis, one more to agree with it). Most turns in this project's own
+  # capture set are shorter than that, so 7 of 16 real captures committed
+  # nothing at all before finalize. This engine makes --streaming-asr HONEST
+  # rather than fast; it does not deliver the latency win streaming was meant to
+  # buy. The floor is a property of the checkpoint, not of these numbers.
+  #
+  # Second limit: unlike a transducer, an independent re-decode can change its
+  # reading of audio it already saw, so committed text can be superseded in
+  # content and not merely extended. Observed on a real capture:
+  # "오늘 산책 코스 추천" -> "오늘 산체코 추천해줘". LocalAgreement's monotonic
+  # guard only prevents the prefix from getting *shorter*, which is a weaker
+  # promise here than it is for the transducer it was designed against.
+  #
+  # There is no endpoint_detected from this engine either -- SenseVoice has no
+  # decoder state to endpoint on, so ending a turn falls entirely to TEN-VAD and
+  # Smart Turn. The dual-endpointing design in asr_stream.py's module docstring
+  # loses one of its two signals under this engine.
+
+# === zipformer ================================================================
+zipformer:
+  model_dir: models/streaming-zipformer-ko
+
+  # --- Endpoint detection ---------------------------------------------------
+  # The recognizer's own endpointing, which decides an utterance is over from
+  # decoder state rather than from raw acoustic energy the way TEN-VAD does.
+  # Both signals run; turn/controller.py arbitrates. Keeping this enabled costs
+  # nothing and gives the controller a second opinion that fails differently.
+  enable_endpoint_detection: true
+
+  # Trailing silence to end a turn when nothing has been decoded yet -- the
+  # "stream opened but the user never really spoke" timeout. sherpa-onnx's own
+  # default; kept generous because firing early here cuts off someone who merely
+  # paused before starting.
+  rule1_min_trailing_silence: 2.4
+
+  # Trailing silence after something HAS been decoded. This is the one that
+  # governs conversational responsiveness, and sherpa-onnx's 1.2s default is
+  # much too slow -- a listener reads a 1.2s gap as the other person having
+  # finished. 0.6s sits just above vad.yaml's min_silence_duration (0.5s), so
+  # TEN-VAD (the tighter, already mic-tuned signal) normally ends the turn first
+  # and this acts as a backstop rather than the primary. ESTIMATED, not yet
+  # measured on a real microphone -- and note it has never had the chance to be,
+  # since this engine returns empty on real speech.
+  rule2_min_trailing_silence: 0.6
+
+  # Hard cap on one utterance. Mirrors vad.yaml's max_speech_duration so neither
+  # component can hold a turn open on its own.
+  rule3_min_utterance_length: 20.0
