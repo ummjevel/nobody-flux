@@ -13,6 +13,7 @@ module doesn't add new models, just the plumbing for future ones.
 
 from __future__ import annotations
 
+import copy
 import os
 import typing
 from pathlib import Path
@@ -59,14 +60,35 @@ _YAML_CACHE: dict[Path, tuple[float, dict[str, Any]]] = {}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Parsed yaml, mtime-cached, returned as a fresh deep copy every call.
+
+    The copy is not defensive politeness, it is required. Callers here treat the
+    returned dict as scratch space -- `config.update(overrides)`,
+    `config.pop(engine_block)` -- and handing out the cached object let those
+    edits persist into the cache. Measured before the fix: loading
+    streaming_asr.yaml, applying one build's overrides, then loading it again
+    returned `num_threads: 99` and no engine blocks at all.
+
+    Both halves of that are silent. The leaked override makes a second build in
+    the same process quietly inherit the first one's tuning, and the missing
+    engine block makes it fall back to dataclass defaults -- which for VAD means
+    presenting an uncalibrated threshold as the configured one. Nothing raises;
+    the numbers just stop meaning what they say. talk.py builds each stage once
+    so it was never hit there, but benchmark.py and the _ab_* scripts build
+    repeatedly in one process.
+
+    deepcopy rather than dict(...) because these configs are nested (per-engine
+    blocks, per-preset params) and a shallow copy would still share the inner
+    dicts, which is exactly what gets popped.
+    """
     mtime = os.path.getmtime(path)
     cached = _YAML_CACHE.get(path)
     if cached is not None and cached[0] == mtime:
-        return cached[1]
+        return copy.deepcopy(cached[1])
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     _YAML_CACHE[path] = (mtime, data)
-    return data
+    return copy.deepcopy(data)
 
 
 def stage_threads(stage: str) -> int | None:
@@ -220,16 +242,55 @@ def list_voices() -> list[str]:
 
 
 def build_vad(**overrides) -> vad.VoiceActivityDetector:
-    """VoiceActivityDetector isn't a named preset like asr/llm/tts (there's
-    only one implementation, TEN-VAD -- see vad.py), just a config's worth of
-    tunable numeric parameters, so this reads configs/vad.yaml as a flat dict
-    straight into the constructor rather than going through _build()'s
-    preset-name indirection. **overrides works the same way as
-    build_asr/build_llm/build_tts's, for one-off tuning without editing the
-    yaml (e.g. from a REPL)."""
+    """Build the VAD from configs/vad.yaml.
+
+    VoiceActivityDetector isn't a named preset like asr/llm/tts -- it's a
+    config's worth of tunable numeric parameters -- so this reads the yaml into
+    the constructor rather than going through _build()'s preset-name
+    indirection. **overrides works the same way as build_asr/build_llm/
+    build_tts's, for one-off tuning without editing the yaml.
+
+    Two engines now exist, selected by the yaml's `engine` key, for the licence
+    reason in vad._ENGINES. Structure mirrors configs/streaming_asr.yaml:
+    engine-independent knobs at the top level, engine-specific ones in a block
+    named after the engine, and only the selected block is merged. Here that
+    matters for `threshold` specifically -- the 0.5 in the ten-vad block is a
+    measurement from this room's microphone, and letting it leak onto a
+    different model would present an uncalibrated number as a calibrated one.
+
+    Unlike build_streaming_transcriber, overrides are applied *after* the block
+    merge. scripts/_calibrate_vad_threshold.py sweeps `threshold` through this
+    function, and a block value that outranked the sweep would make every
+    iteration measure the same number.
+    """
     config = _load_yaml(VAD_CONFIG_PATH)
-    config.update(overrides)
-    return vad.VoiceActivityDetector(**config)
+    engine = overrides.pop("engine", None) or config.pop("engine", "ten-vad")
+    config.pop("engine", None)
+
+    engine_params = {}
+    for name in vad.VAD_ENGINES:
+        block = config.pop(name, None) or {}
+        if name == engine:
+            engine_params = block
+    params = {**config, **engine_params, **overrides, "engine": engine}
+
+    if params.get("model_path"):
+        # Written relative to the project root in the yaml, the same convention
+        # _build() applies to preset params.
+        params["model_path"] = PROJECT_ROOT / params["model_path"]
+
+    # A key the constructor has no field for is a config error worth reporting
+    # rather than dropping -- silently dropping is how a knob appears tuned
+    # while doing nothing. Same guard as build_streaming_transcriber's.
+    accepted = set(vad.VoiceActivityDetector.__dataclass_fields__)
+    unknown = sorted(set(params) - accepted)
+    if unknown:
+        raise ValueError(
+            f"configs/vad.yaml sets {unknown} which VoiceActivityDetector "
+            f"(engine: {engine}) has no field for. Move them under the engine "
+            f"block they belong to, or remove them."
+        )
+    return vad.VoiceActivityDetector(**params)
 
 
 def build_audio_session(backend: str | None = None) -> audio_session.AudioSession:

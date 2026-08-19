@@ -92,7 +92,8 @@ espeak-ng API 전체와 piper-phonemize의 `phonemize_eSpeak` C++ 심볼, 하드
 | 스테이지 | 모델 | 라이선스 | 등급 |
 |---|---|---|---|
 | ASR (기본) | SenseVoice-Small int8 | 🚨 **FunASR Model Open Source License v1.1** — Apache도 MIT도 아니다 | **[디스크]** + [레포기록] §11.1 |
-| VAD | TEN-VAD | 🚨 **Apache-2.0 "with additional conditions"** — Agora 경쟁 금지 조항 | **[1차]** §2.3 |
+| VAD (기본) | TEN-VAD | 🚨 **Apache-2.0 "with additional conditions"** — Agora 경쟁 금지 조항 | **[1차]** §2.3 |
+| VAD (대체) | Silero VAD | **MIT**, 추가 조건 없음 | **[1차]** [LICENSE](https://github.com/snakers4/silero-vad/blob/master/LICENSE) + ONNX 메타데이터 |
 | 엔드포인트 | Smart Turn v3.2 | BSD-2-Clause (pipecat-ai) | [레포기록] `setup_common.sh:266` |
 | LLM (기본) | Mi:dm 2.0 Mini Instruct Q4_K_M | **MIT** | **[1차]** 원본 `K-intelligence/Midm-2.0-Mini-Instruct` (우리가 받는 건 `mykor/...-gguf` 재양자화본 — 규칙 1대로 원본을 확인) |
 | LLM (대체) | Qwen3-0.6B Q4_K_M | 원본 `Qwen/Qwen3-0.6B`은 **Apache-2.0**. 우리가 받는 `bartowski/Qwen_Qwen3-0.6B-GGUF`는 **라이선스를 선언하지 않고 LICENSE 파일도 없다**(`base_model`만 명시) | **[1차]** 둘 다 확인. 파생본 선언은 **[확인 불가]** — §2.5 |
@@ -149,6 +150,25 @@ BSD-3-Clause·BSD-2-Clause 코드를 포함한다(레포 `NOTICES`).
 `comment: "It uses 0 as the pitch feature, which may degrade the performance."`
 → sherpa가 export할 때 **pitch feature를 버렸다.** 우리 기본 VAD는 **의도적으로 열화된
 빌드**다. VAD 임계값 튜닝(`_calibrate_vad_threshold.py`)의 상한이 여기서 정해진다.
+
+**조치 (2026-08-19):** 기본값을 바꾸지 않았다. 대신 **VAD 엔진을 설정값으로** 만들었다
+(`configs/vad.yaml`의 `engine`) — `ten-vad` | `silero-vad`. 이유는 이 판단이 코드 변경이
+아니라 사람의 결정이어야 하기 때문이고, 결정이 어느 쪽으로 나든 그때 급하게 코드를 고치는
+상황을 피하기 위해서다. Silero 모델은 setup 스크립트가 기본으로 받는다(629KB).
+
+**Silero로 바꿀 때 잃는 것:** `ten-vad` 블록의 `threshold: 0.5`는 이 방 마이크에 대한
+**실측값**이고 다른 모델로 이전되지 않는다. 그래서 threshold를 공유 키가 아니라 **엔진
+블록 안에** 뒀다. 실패가 비대칭이라는 점이 중요하다 — 임계값이 낮으면 모델이 침묵을 발화로
+보고해 **턴이 영원히 끝나지 않는다**(이 레포가 실제로 겪은 실패). 재캘리브레이션이
+`_calibrate_vad_threshold.py`이고, 그 스크립트도 이제 yaml의 `engine`을 읽는다 —
+안 그러면 silero를 설정해두고 ten-vad를 캘리브레이션해서 그 수치를 보고했을 것이다.
+
+**받은 Silero 체크포인트의 정체** [디스크, ONNX 메타데이터]:
+`comment: "This is silero-vad v4 exported to onnx by k2-fsa. Only the 16kHz branch is kept"`
+→ **v4**이고 16kHz 전용이다(우리 `SAMPLE_RATE`가 16000이라 문제없음). 입력이 `x: [1, 512]`로
+**window_size 512가 그래프에 박혀 있다**(TEN-VAD는 256). 그래서 `window_size`를 두 엔진이
+공유하지 않고 각자 sherpa 기본값을 쓰게 뒀다. v5를 원하면 같은 릴리스에
+`silero_vad_v5.onnx`(2.2MB)가 있다.
 
 ### 2.4 vocos 보코더 — 문서에 없고 파일에 있었다
 

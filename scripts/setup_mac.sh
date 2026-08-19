@@ -57,6 +57,14 @@ fetch_file "$PROJECT_ROOT/models/ten-vad/ten-vad.onnx" \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx" \
     "ten-vad.onnx (~330KB)"
 
+# Second VAD engine (configs/vad.yaml `engine: silero-vad`). Fetched by default
+# because the reason to switch is a licence term, not a bug: TEN-VAD is
+# Apache-2.0 "with additional conditions" (non-compete -- THIRD-PARTY-NOTICES.md
+# 2.3), Silero VAD is plain MIT. ten-vad stays the default.
+fetch_file "$PROJECT_ROOT/models/silero-vad/silero_vad.onnx" \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx" \
+    "silero_vad.onnx (~629KB, alternative VAD)"
+
 echo "== [mac] 4/8: LLM weights (GGUF) =="
 # Default preset, picked by measuring conversational behaviour rather than
 # benchmark scores -- see docs/llm-conversational-selection.md.

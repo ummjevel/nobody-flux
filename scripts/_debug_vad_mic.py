@@ -8,12 +8,17 @@ where the model works fine on file-based tests but not on someone's actual
 live mic. Run it, speak into the mic for the recording window, then send
 both the printed output and the wav file it writes.
 
-Deliberately does NOT import src.nobody_flux.registry: registry.py does
-`from . import asr, llm, tts, vad`, and llm.py pulls in the full
-transformers/torch stack just to build a VAD. Reading configs/vad.yaml
-directly here keeps this script's dependency surface to just vad.py, so it
-stays usable even if something unrelated breaks in the transformers/torch
-import chain (confirmed to happen once already -- see git history).
+This used to avoid importing src.nobody_flux.registry and read configs/vad.yaml
+directly, because registry.py does `from . import asr, llm, tts, vad` and llm.py
+pulled in the full transformers/torch stack just to build a VAD -- which had
+broken this script once already (see git history).
+
+That is no longer true: llm.py defers both imports now (see its module
+docstring). Measured 2026-08-19 -- importing registry loads neither torch nor
+transformers nor llama_cpp, and costs 0.56s against 0.40s for vad.py alone. So
+this goes through registry.build_vad(), which it has to: configs/vad.yaml has
+per-engine blocks now and a flat splat into the constructor would hand
+VoiceActivityDetector a dict.
 
 Usage:
     source scripts/env.sh
@@ -31,8 +36,9 @@ import sounddevice as sd
 import soundfile as sf
 import yaml
 
+from src.nobody_flux import registry
 from src.nobody_flux.paths import PROJECT_ROOT
-from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE, VoiceActivityDetector
+from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE
 
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 DURATION_S = float(sys.argv[1]) if len(sys.argv) > 1 else 6.0
@@ -40,9 +46,9 @@ OUT_PATH = PROJECT_ROOT / "data" / "debug_vad_capture.wav"
 
 
 def main():
-    with open(VAD_CONFIG_PATH, encoding="utf-8") as f:
-        vad_config = yaml.safe_load(f)
-    vad = VoiceActivityDetector(**vad_config)
+    # Through the registry: configs/vad.yaml has per-engine blocks now, so a
+    # flat splat into the constructor no longer works.
+    vad = registry.build_vad()
 
     print(f"threshold={vad.threshold} min_speech_duration={vad.min_speech_duration}")
     print(f"Recording {DURATION_S:.1f}s -- speak now...")

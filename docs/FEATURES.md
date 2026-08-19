@@ -207,6 +207,11 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | GPL-3.0 고지·소스 제공 | **부분 해결** | `THIRD-PARTY-NOTICES.md` 신규 — 라이선스 전문 위치와 **대응 소스 위치**(espeak-ng `dictsource/`·`phsource/`) 명시. **실측: 모델 번들 15개 중 라이선스 파일을 싣는 건 3개**이고 하나는 URL 한 줄(`sense-voice`), 하나는 가중치에 틀린 MIT(Supertonic 샘플코드용). 이미지에 무엇을 동봉해야 충분한지는 **여전히 법무 판단** |
 | 🚨 **기본 VAD(TEN-VAD)가 Apache-2.0이 아니다** | **1차확인 — 라이선스 함정 7번** | "Apache License v2.0 **with additional conditions**"이고 추가 조항이 **Agora 경쟁 금지**다(*"may not Deploy the ten-vad in a way that competes with Agora's offerings"*). 파생물도 같은 조건 유지. SenseVoice(§11.1)와 같은 계열 — **기본값 스테이지의 라이선스를 확인한 적이 없었다.** 제품화 전 법무 |
 | ⚠️ **기본 VAD가 열화된 export다** | **1차확인 — ONNX 메타데이터** | `ten-vad.onnx`의 `comment`: *"It uses 0 as the pitch feature, which may degrade the performance."* sherpa export가 **pitch feature를 버렸다.** `_calibrate_vad_threshold.py`로 짜낼 수 있는 성능의 상한이 여기서 정해진다 |
+| VAD 엔진이 설정값이 됐다 | **있음** | `configs/vad.yaml`의 `engine`: `ten-vad`(기본) \| `silero-vad`(MIT). 라이선스 판단이 코드 변경이 되지 않게 하는 것이 목적 — 기본값은 **안 바꿨다**. 코드 접점은 `vad.build_sherpa_vad_config` 한 곳, 테스트 16개 |
+| 엔진별 `threshold` 분리 | **있음 — 의도적** | `threshold: 0.5`는 이 방 마이크 **실측값**이고 다른 모델로 이전되지 않는다. 그래서 공유 키가 아니라 **엔진 블록 안**에 뒀다. `_calibrate_vad_threshold.py`도 이제 yaml의 `engine`을 읽는다 — 안 그러면 silero 설정에 ten-vad를 캘리브레이션해 보고했을 것 |
+| 받은 Silero의 정체 | **1차확인 — ONNX 메타데이터** | **v4**, 16kHz 브랜치만(`SAMPLE_RATE` 16000이라 무관). 입력 `x: [1, 512]`로 **window_size 512가 그래프에 박혀 있다**(TEN-VAD는 256) → `window_size`를 공유하지 않고 엔진별 sherpa 기본값을 쓴다. v5는 같은 릴리스에 별 파일로 있음 |
+| 두 엔진 분절 비교 (깨끗한 wav) | **실측 — 예비** | `ko.wav`(5.61s)에서 speech 3.01s(ten) vs 2.88s(silero), 이벤트 시퀀스 동일. **실제 캡처·사람 청취는 미실시** — 품질 비교로 읽지 말 것 |
+| 🐛 `_load_yaml`이 캐시를 오염시켰다 | **실측 — 기존 버그 수정** | mtime 캐시된 **같은 dict 객체**를 반환하는데 모든 빌더가 그걸 `update`/`pop`한다 → 한 프로세스에서 두 번 빌드하면 **첫 호출의 override가 남고 엔진 블록이 사라져** dataclass 기본값으로 조용히 폴백. 재현: streaming_asr.yaml 재로드가 `num_threads: 99`와 블록 0개를 반환. `talk.py`는 스테이지를 한 번만 빌드해서 안 걸렸지만 `benchmark.py`·`_ab_*`는 반복 빌드한다. deepcopy 반환으로 수정, 회귀 테스트 15개 |
 | 재배포 모델 출처 추적법 | **1차확인 — 방법** | sherpa 문서·릴리스노트·export PR(#2012)에 없던 `vocos` 출처가 **ONNX 메타데이터 안에** 있었다(`model_author: BSC-LT`, `url1/url2`) → Apache-2.0 확정. `ten-vad`(라이선스 URL + 열화 경고)와 `matcha-ko`(`has_espeak`)도 같은 방식으로 나왔다. **문서보다 파일이 정확하다** |
 | 미확인 가중치 라이선스 6건 | **해결 — 전건 확인** | TEN-VAD(Apache+조건, 위), Mi:dm **MIT**(원본 `K-intelligence` 확인 — 우리가 받는 건 `mykor` 재양자화본), vocos **Apache-2.0**, matcha-en(icefall Apache-2.0 + LJSpeech, **가중치 선언 없음**), zipformer-ko(**태그 없음** + KsponSpeech 신청 필요), Qwen3 GGUF(원본 Apache-2.0, **bartowski 파생본은 선언·LICENSE 파일 둘 다 없음**). 파이썬 의존 10개는 dist-info로 전건 확인, 전부 permissive |
 | espeak 데이터 경로 우선순위 | **1차확인 — 소스** | `espeak_ng_InitializePath`: **넘긴 경로 → `ESPEAK_DATA_PATH` → `$HOME` → 컴파일 기본값**. 즉 우리가 유효한 경로를 주면 **env var도 레지스트리도 못 덮어쓴다** → `ESPEAK_DATA_PATH`는 위험이 아니다(검색 요약은 반대로 말했고 소스가 반박) |
@@ -230,7 +235,7 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | 숫자·로마자 확장 (`korean_tn.expand`) — 텍스트 변환 | **있음** (63개 테스트) | 한자어/고유어 수사, 만·억 그룹, 유월·시월, 소수·퍼센트·전화번호, 두문자어 |
 | 같은 것 — **로마자·고유어 수사 실제 발음** | **실측 개선** | 두 프리셋 모두: `ABC`→"엠비이"/"W파이 Premier번 on ABCia" 였다가 "에이비시"로. `23살`→"2십3 살"/"이샘살" 이었다가 "스물세 살"로 |
 | 같은 것 — **한자어 수사 실제 발음** | **미검증** | ⚠️ ASR 라운드트립으로는 **원리적으로 검증 불가**. SenseVoice가 역정규화를 해서 올바른 "이십 분"을 "20분"으로 되돌린다 = 판정자가 검증 대상 변환을 되돌린다. `"만 이천 원"`이 `"120 원"`으로 돌아온 사례가 있는데 TTS 탓인지 ASR 탓인지 **듣지 않고는 알 수 없다** → 아래 사람 검증 목록으로 |
-| 순수 로직 단위 테스트 | **있음** (306개, <3s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, 스레드 예산, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
+| 순수 로직 단위 테스트 | **있음** (337개, <3s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, 스레드 예산, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
 | `barge_in_confirm_ms` (250) | 추정치 | 실제 맞장구/끼어들기 발화 녹음 필요 (`_calibrate_turn_params.py`) |
 | `BACKCHANNEL_MAX_DURATION_S` | 추정치 | 위와 같음 — 단, 게이트에 들어가는 duration이 pre-roll 제외한 실발화 길이(`speech_duration_s`)라는 것 자체는 회귀 테스트로 고정(2026-08-14 전까지는 pre-roll 포함 길이가 들어가 게이트가 죽은 코드였다) |
 | ~~`is_empty_transcript`의 `len <= 1` 섀도잉~~ | **수정 (2026-08-19)** | 한 글자라 `BACKCHANNEL_WORDS` 20개 중 **10개(네 넵 아 어 예 오 와 음 응 헐)가 도달 불가**였다 = **어시스턴트가 "네"를 못 들었다**. 그리고 "뭐?"·"왜?"를 침묵으로 버려 talk.py의 마이크 사망 경고를 거짓 발동시켰다. 이제 "짧은가"가 아니라 **"조각인가"**를 묻는다 — `ONE_SYLLABLE_WORDS = {뭐, 뭘, 왜}`(→FINISHED)와 `BACKCHANNEL_WORDS`(→WAIT)는 통과, 나머지 1글자는 그대로 EMPTY. 회귀 테스트로 **모든 맞장구 단어의 도달 가능성**을 고정 |
@@ -335,7 +340,7 @@ ASR로 폴백하므로 대화는 계속 된다 — 다만 그 폴백이 **완전
 ## 사람이 직접 해야 할 검증 (미완료)
 
 **여기 있는 건 자동화할 수 없다.** 사람이 말하고, 듣고, 판단해야 하는 것들이다. `tests/`의
-306개 테스트는 "코드가 명세대로 동작한다"만 보증하며 아래 어느 것도 대신하지 못한다.
+337개 테스트는 "코드가 명세대로 동작한다"만 보증하며 아래 어느 것도 대신하지 못한다.
 이 목록이 비기 전까지, 턴테이킹 경로의 동작은 **설계상 그럴 것**이지 **확인된 것**이 아니다.
 
 1~4번은 **같은 세션에서 한 번에** 하는 게 맞다. 말을 걸어야 1·2번이 되고, 그 부산물로 3번의

@@ -216,6 +216,14 @@ Write-Step 6 $total "TEN-VAD + Smart Turn v3 (turn taking)"
 Get-File -Label 'ten-vad.onnx (~330KB)' `
     -Url 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx' `
     -Path (Join-Path $ProjectRoot 'models\ten-vad\ten-vad.onnx')
+# Second VAD engine, selectable with `engine: silero-vad` in configs/vad.yaml.
+# Fetched by default so the choice is never a download under time pressure:
+# TEN-VAD is Apache-2.0 "with additional conditions" (a non-compete term -- see
+# THIRD-PARTY-NOTICES.md 2.3) while Silero VAD is plain MIT. ten-vad stays the
+# default and is the only engine calibrated on this hardware.
+Get-File -Label 'silero_vad.onnx (~629KB)' `
+    -Url 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx' `
+    -Path (Join-Path $ProjectRoot 'models\silero-vad\silero_vad.onnx')
 Get-File -Label 'smart-turn-v3.2-cpu.onnx (~8.7MB)' `
     -Url 'https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx' `
     -Path (Join-Path $ProjectRoot 'models\smart-turn-v3\smart-turn-v3.2-cpu.onnx')

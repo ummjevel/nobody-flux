@@ -74,10 +74,14 @@ import soundfile as sf
 import yaml
 
 from src.nobody_flux.paths import PROJECT_ROOT
-from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE
+from src.nobody_flux.turn.vad import (
+    FRAME_SAMPLES,
+    SAMPLE_RATE,
+    build_sherpa_vad_config,
+    default_model_path,
+)
 
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
-TEN_VAD_MODEL = PROJECT_ROOT / "models" / "ten-vad" / "ten-vad.onnx"
 # Ships with the SenseVoice model, so no test asset has to be committed.
 DEFAULT_SPEECH_WAV = PROJECT_ROOT / "models" / "sense-voice" / "test_wavs" / "ko.wav"
 DEFAULT_ROOM_WAV = PROJECT_ROOT / "data" / "room_tone.wav"
@@ -182,17 +186,29 @@ def build_vad(threshold: float, cfg: dict) -> sherpa_onnx.VoiceActivityDetector:
     """A raw sherpa-onnx VAD with everything from vad.yaml except the threshold
     under test. Raw rather than ``VoiceActivityDetector`` because this measures
     the *model's* behaviour, below the pre-roll/barge-in/carry logic that wraps
-    it -- mixing the two would make it unclear which layer a result came from."""
-    ten = sherpa_onnx.TenVadModelConfig(
-        model=str(TEN_VAD_MODEL),
-        threshold=threshold,
-        min_silence_duration=cfg["min_silence_duration"],
-        min_speech_duration=cfg["min_speech_duration"],
-        max_speech_duration=cfg["max_speech_duration"],
-    )
+    it -- mixing the two would make it unclear which layer a result came from.
+
+    The engine comes from the yaml via the shared builder in vad.py rather than
+    being hardcoded here. Hardcoding it was the previous behaviour and it is now
+    a trap: with two engines selectable, this script would happily calibrate
+    TEN-VAD while configs/vad.yaml said silero-vad, and print the thresholds as
+    if they applied. A number that looks measured while measuring the wrong
+    thing is the failure mode this project keeps meeting.
+    """
+    engine = cfg.get("engine", "ten-vad")
+    block = cfg.get(engine) or {}
+    model_path = block.get("model_path")
+    model_path = (PROJECT_ROOT / model_path) if model_path else default_model_path(engine)
     return sherpa_onnx.VoiceActivityDetector(
-        sherpa_onnx.VadModelConfig(
-            ten_vad=ten, sample_rate=SAMPLE_RATE, num_threads=cfg.get("num_threads", 1)
+        build_sherpa_vad_config(
+            engine,
+            model_path,
+            threshold=threshold,
+            min_silence_duration=cfg["min_silence_duration"],
+            min_speech_duration=cfg["min_speech_duration"],
+            max_speech_duration=cfg["max_speech_duration"],
+            num_threads=cfg.get("num_threads", 1),
+            window_size=block.get("window_size"),
         ),
         buffer_size_in_seconds=100,
     )

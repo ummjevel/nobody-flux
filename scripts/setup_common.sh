@@ -64,10 +64,10 @@ cd "$PROJECT_ROOT"
 
 export UV_LINK_MODE=copy
 
-echo "== [$TARGET_LABEL] 1/12: uv sync (project deps) =="
+echo "== [$TARGET_LABEL] 1/13: uv sync (project deps) =="
 uv sync
 
-echo "== [$TARGET_LABEL] 2/12: GPU sanity check =="
+echo "== [$TARGET_LABEL] 2/13: GPU sanity check =="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
@@ -80,7 +80,7 @@ if not torch.cuda.is_available():
     print('WARNING: running on CPU. ASR/LLM/TTS will all be much slower.')
 "
 
-echo "== [$TARGET_LABEL] 3/12: SenseVoice ASR model assets =="
+echo "== [$TARGET_LABEL] 3/13: SenseVoice ASR model assets =="
 SENSE_VOICE_DIR="$PROJECT_ROOT/models/sense-voice"
 if [ ! -f "$SENSE_VOICE_DIR/model.int8.onnx" ]; then
     echo "Downloading sherpa-onnx SenseVoice-Small (int8, ~230MB)..."
@@ -94,7 +94,7 @@ else
     echo "Already present at $SENSE_VOICE_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 4/12: MOSS-TTS-Nano (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 4/13: MOSS-TTS-Nano (external, isolated venv) =="
 MOSS_DIR="$PROJECT_ROOT/external/MOSS-TTS-Nano"
 if [ ! -d "$MOSS_DIR" ]; then
     echo "Cloning OpenMOSS/MOSS-TTS-Nano into external/..."
@@ -122,7 +122,7 @@ if [ ! -f "$PROJECT_ROOT/data/reference_voice_16k.wav" ]; then
     echo "reference clip. Place a 16kHz mono wav there (see README.md)."
 fi
 
-echo "== [$TARGET_LABEL] 5/12: VibeASR.cpp (ASR candidate, compiled binary) =="
+echo "== [$TARGET_LABEL] 5/13: VibeASR.cpp (ASR candidate, compiled binary) =="
 VIBEASR_DIR="$PROJECT_ROOT/external/VibeASR.cpp"
 if [ ! -d "$VIBEASR_DIR" ]; then
     echo "Cloning microsoft/VibeASR.cpp (with submodules) into external/..."
@@ -182,7 +182,7 @@ for f in vibeasr-vae-encoder-i8_s.gguf vibeasr-lm-i2_s-embed-q6_k.gguf; do
     fi
 done
 
-echo "== [$TARGET_LABEL] 6/12: FreyaTTS (external, isolated venv) =="
+echo "== [$TARGET_LABEL] 6/13: FreyaTTS (external, isolated venv) =="
 FREYATTS_VENV_DIR="$PROJECT_ROOT/external/freyatts-venv"
 if [ ! -x "$FREYATTS_VENV_DIR/bin/python" ]; then
     echo "Creating FreyaTTS's own venv (kept separate -- freyatts's own torch"
@@ -202,7 +202,7 @@ if [ ! -f "$PROJECT_ROOT/models/freyatts-ko-voiceA/model.safetensors" ]; then
     echo "the freyatts-ko-voicea TTS preset."
 fi
 
-echo "== [$TARGET_LABEL] 7/12: sherpa-onnx Matcha-TTS (English, comparison only) =="
+echo "== [$TARGET_LABEL] 7/13: sherpa-onnx Matcha-TTS (English, comparison only) =="
 MATCHA_DIR="$PROJECT_ROOT/models/sherpa-matcha-en"
 if [ ! -f "$MATCHA_DIR/model-steps-3.onnx" ]; then
     echo "Downloading matcha-icefall-en_US-ljspeech (~71MB acoustic model + tokens + espeak-ng-data)..."
@@ -223,7 +223,7 @@ else
     echo "Vocoder already present, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 8/12: TEN-VAD model =="
+echo "== [$TARGET_LABEL] 8/13: TEN-VAD model =="
 TEN_VAD_DIR="$PROJECT_ROOT/models/ten-vad"
 if [ ! -f "$TEN_VAD_DIR/ten-vad.onnx" ]; then
     echo "Downloading ten-vad.onnx (~330KB)..."
@@ -234,7 +234,23 @@ else
     echo "Already present at $TEN_VAD_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 9/12: LLM weights (GGUF) =="
+echo "== [$TARGET_LABEL] 9/13: Silero VAD (alternative VAD engine) =="
+# A second VAD, selectable with `engine: silero-vad` in configs/vad.yaml.
+# Fetched by default (629KB) so the choice never becomes a download under time
+# pressure: TEN-VAD's licence is Apache-2.0 "with additional conditions" -- a
+# non-compete term that is a decision for a person, not a setting (see
+# THIRD-PARTY-NOTICES.md 2.3). Silero VAD is MIT with no additional conditions.
+# Not the default and not calibrated on this hardware; ten-vad still is.
+SILERO_VAD_DIR="$PROJECT_ROOT/models/silero-vad"
+if [ ! -f "$SILERO_VAD_DIR/silero_vad.onnx" ]; then
+    echo "Downloading silero_vad.onnx (~629KB)..."
+    mkdir -p "$SILERO_VAD_DIR"
+    curl -L -o "$SILERO_VAD_DIR/silero_vad.onnx"         "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+else
+    echo "Already present at $SILERO_VAD_DIR, skipping."
+fi
+
+echo "== [$TARGET_LABEL] 10/13: LLM weights (GGUF) =="
 # Mi:dm 2.0 Mini is the DEFAULT preset (configs/models.yaml), chosen by
 # measuring conversational behaviour rather than benchmark scores -- see
 # docs/llm-conversational-selection.md. MIT licensed, Korean-first, built for
@@ -260,7 +276,7 @@ else
     echo "Already present at $GGUF_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 10/12: Smart Turn v3 endpoint detector (optional) =="
+echo "== [$TARGET_LABEL] 11/13: Smart Turn v3 endpoint detector (optional) =="
 SMART_TURN_DIR="$PROJECT_ROOT/models/smart-turn-v3"
 if [ ! -f "$SMART_TURN_DIR/smart-turn-v3.2-cpu.onnx" ]; then
     echo "Downloading smart-turn-v3.2-cpu.onnx (~8.7MB, pipecat-ai, BSD-2)..."
@@ -271,7 +287,7 @@ else
     echo "Already present at $SMART_TURN_DIR, skipping."
 fi
 
-echo "== [$TARGET_LABEL] 11/12: streaming Zipformer Korean ASR (third ASR candidate) =="
+echo "== [$TARGET_LABEL] 12/13: streaming Zipformer Korean ASR (third ASR candidate) =="
 ZIPFORMER_DIR="$PROJECT_ROOT/models/streaming-zipformer-ko"
 if [ ! -f "$ZIPFORMER_DIR/encoder-epoch-99-avg-1.int8.onnx" ]; then
     echo "Downloading sherpa-onnx-streaming-zipformer-korean-2024-06-16 (~60MB int8)..."
@@ -284,7 +300,7 @@ if [ ! -f "$ZIPFORMER_DIR/encoder-epoch-99-avg-1.int8.onnx" ]; then
 else
     echo "Already present at $ZIPFORMER_DIR, skipping."
 fi
-echo "== [$TARGET_LABEL] 12/12: Supertonic 3 TTS (fourth TTS candidate) =="
+echo "== [$TARGET_LABEL] 13/13: Supertonic 3 TTS (fourth TTS candidate) =="
 # Korean-capable and character-level (no G2P, no espeak-ng-data), and already
 # supported by the pinned sherpa-onnx -- OfflineTtsSupertonicModelConfig is in
 # 1.13.4, so this needs no dependency bump.

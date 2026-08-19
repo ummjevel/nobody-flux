@@ -63,6 +63,98 @@ FRAME_MS = 30
 FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_MS / 1000)  # 480
 
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "ten-vad" / "ten-vad.onnx"
+SILERO_MODEL_PATH = PROJECT_ROOT / "models" / "silero-vad" / "silero_vad.onnx"
+
+# The two VAD models sherpa-onnx 1.13.4 can run, and how to hand each one to it.
+# Both sub-configs take an identical set of fields (threshold,
+# min/max_speech_duration, min_silence_duration, model, window_size), so the only
+# thing that actually differs is which keyword VadModelConfig wants and where the
+# weights live -- which is what makes this a table rather than a branch.
+#
+# Why a second engine exists at all: TEN-VAD is not Apache-2.0. It is
+# "Apache License v2.0 with additional conditions", and the additional condition
+# forbids deploying it "in a way that competes with Agora's offerings ...
+# including without limitation enabling any third party to develop or deploy
+# Applications". Commercial use is explicitly allowed and an end-user
+# application is the case the license carves out, so this is not a ban -- but it
+# is a term someone has to agree to, and it is not one this project can decide
+# on its own behalf. Silero VAD is MIT with no additional conditions.
+# THIRD-PARTY-NOTICES.md §2.3 has the verbatim text.
+#
+# So the point of the table is that the choice stays a config value. Nothing here
+# recommends switching; ten-vad remains the default and is the only one this
+# project has calibrated.
+_ENGINES = {
+    # engine name -> (VadModelConfig keyword, sub-config attribute, default weights)
+    "ten-vad": ("ten_vad", "TenVadModelConfig", DEFAULT_MODEL_PATH),
+    "silero-vad": ("silero_vad", "SileroVadModelConfig", SILERO_MODEL_PATH),
+}
+
+VAD_ENGINES = tuple(_ENGINES)
+
+
+def default_model_path(engine: str) -> Path:
+    """Where `engine`'s weights live by default. Used by registry.build_vad and
+    by the calibration scripts so none of them hardcodes one engine's path."""
+    try:
+        return _ENGINES[engine][2]
+    except KeyError:
+        raise ValueError(
+            "unknown VAD engine %r; expected one of %s" % (engine, ", ".join(VAD_ENGINES))
+        ) from None
+
+
+def build_sherpa_vad_config(
+    engine: str,
+    model_path: Path | str,
+    *,
+    threshold: float,
+    min_silence_duration: float,
+    min_speech_duration: float,
+    max_speech_duration: float,
+    num_threads: int = 1,
+    window_size: int | None = None,
+):
+    """The sherpa-onnx VadModelConfig for `engine`, with the model file checked.
+
+    Shared by VoiceActivityDetector and by scripts/_calibrate_vad_threshold.py,
+    which deliberately drives the raw sherpa VAD rather than our wrapper --
+    without a shared builder that script would keep calibrating TEN-VAD while
+    the config said silero, and report the numbers as if they applied. That is
+    the shape of bug this project has hit repeatedly (a value that looks tuned
+    while doing nothing), so the engine choice lives in exactly one place.
+
+    The path is checked here for the same reason SherpaMatchaTts checks its
+    data_dir: a missing model file should name itself in Python rather than
+    surface as a sherpa-onnx log line or, worse, a native-level failure.
+    """
+    if engine not in _ENGINES:
+        raise ValueError(
+            "unknown VAD engine %r; expected one of %s" % (engine, ", ".join(VAD_ENGINES))
+        )
+    kwarg, config_cls_name, _ = _ENGINES[engine]
+    path = Path(model_path)
+    if not path.is_file():
+        raise FileNotFoundError(
+            "VAD model for engine %r not found: %s. Run scripts/setup_*.sh to "
+            "fetch it, or set a different engine in configs/vad.yaml." % (engine, path)
+        )
+    params = dict(
+        model=str(path),
+        threshold=threshold,
+        min_silence_duration=min_silence_duration,
+        min_speech_duration=min_speech_duration,
+        max_speech_duration=max_speech_duration,
+    )
+    if window_size is not None:
+        # Left to sherpa-onnx's per-engine default unless asked, because the two
+        # engines do not share one: setting a single value for both would be a
+        # silent change to whichever engine did not want it.
+        params["window_size"] = window_size
+    engine_config = getattr(sherpa_onnx, config_cls_name)(**params)
+    return sherpa_onnx.VadModelConfig(
+        sample_rate=SAMPLE_RATE, num_threads=num_threads, **{kwarg: engine_config}
+    )
 
 
 @dataclass
@@ -200,7 +292,12 @@ class _AudioRing:
 
 @dataclass
 class VoiceActivityDetector:
-    """Configuration for TEN-VAD, and a factory for the streams that run it.
+    """Configuration for the VAD model, and a factory for the streams that run it.
+
+    Which model is a config value (`engine`), not a code choice -- see _ENGINES.
+    The default is TEN-VAD, and every tuned number in configs/vad.yaml was
+    measured against it; switching engines invalidates that calibration rather
+    than carrying it over.
 
     This object is cheap to hold and holds no per-utterance state -- that lives
     in ``VadStream``. One detector can therefore be built once from
@@ -208,9 +305,18 @@ class VoiceActivityDetector:
     per turn, or one long-lived stream for a whole session.
     """
 
-    model_path: Path = DEFAULT_MODEL_PATH
+    # Which VAD model runs. See _ENGINES above for the two choices and for why
+    # there are two. ten-vad is the default and the only one calibrated here.
+    engine: str = "ten-vad"
+    # None means "whatever this engine ships as its default path", so that
+    # switching engine in configs/vad.yaml does not also require restating the
+    # path. An explicit value always wins.
+    model_path: Path | None = None
+    # Left None so sherpa-onnx applies each engine's own default; the two do not
+    # agree on a value, so a single shared number would silently change one.
+    window_size: int | None = None
 
-    # -- TEN-VAD's own parameters -----------------------------------------
+    # -- the VAD model's own parameters -----------------------------------
     # Listed explicitly rather than left to sherpa-onnx's defaults, so they are
     # overridable like every other field and so behaviour cannot change
     # silently if sherpa-onnx ever changes ITS defaults.
@@ -260,15 +366,17 @@ class VoiceActivityDetector:
     _vad: object = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
-        ten_vad_config = sherpa_onnx.TenVadModelConfig(
-            model=str(self.model_path),
+        if self.model_path is None:
+            self.model_path = default_model_path(self.engine)
+        vad_config = build_sherpa_vad_config(
+            self.engine,
+            self.model_path,
             threshold=self.threshold,
             min_silence_duration=self.min_silence_duration,
             min_speech_duration=self.min_speech_duration,
             max_speech_duration=self.max_speech_duration,
-        )
-        vad_config = sherpa_onnx.VadModelConfig(
-            ten_vad=ten_vad_config, sample_rate=SAMPLE_RATE, num_threads=self.num_threads
+            num_threads=self.num_threads,
+            window_size=self.window_size,
         )
         # buffer_size_in_seconds is sherpa-onnx's own internal buffer for audio
         # it is still deciding about. 100s is comfortably above

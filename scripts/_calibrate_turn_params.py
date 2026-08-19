@@ -24,8 +24,10 @@ is unreliable -- see talk.py):
     source scripts/env.sh
     uv run python scripts/_calibrate_turn_params.py
 
-Deliberately reads configs/vad.yaml directly rather than importing registry, same
-dependency-surface reasoning as scripts/_debug_vad_mic.py.
+Goes through registry.build_vad(). It used to read configs/vad.yaml directly to
+keep clear of the transformers/torch import chain, same reasoning as
+scripts/_debug_vad_mic.py -- and that reasoning has since expired; see the note
+there. The yaml's per-engine blocks now require the registry's merge anyway.
 """
 
 from __future__ import annotations
@@ -40,8 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import yaml
 
+from src.nobody_flux import registry
 from src.nobody_flux.paths import PROJECT_ROOT
-from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE, VoiceActivityDetector
+from src.nobody_flux.turn.vad import FRAME_SAMPLES, SAMPLE_RATE
 
 VAD_CONFIG_PATH = PROJECT_ROOT / "configs" / "vad.yaml"
 
@@ -128,8 +131,10 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(VAD_CONFIG_PATH, encoding="utf-8") as f:
-        vad = VoiceActivityDetector(**yaml.safe_load(f))
+    # Through the registry rather than yaml.safe_load straight into the
+    # constructor: configs/vad.yaml has per-engine blocks now, and a flat splat
+    # would hand VoiceActivityDetector a dict as `ten-vad`.
+    vad = registry.build_vad()
 
     durations: dict[str, list[float]] = {v: [] for v in LABELS.values()}
     print(

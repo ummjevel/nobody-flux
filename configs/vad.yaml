@@ -1,30 +1,40 @@
-# Tunable parameters for src/nobody_flux/vad.py's VoiceActivityDetector
-# (TEN-VAD via sherpa_onnx). Same "swap via config, not code" idea as
-# models.yaml -- change a value here, no code edit, no CLI flag to remember.
-# See VoiceActivityDetector's own docstring/field comments for what each one
-# does and why its default is what it is.
+# Tunable parameters for src/nobody_flux/turn/vad.py's VoiceActivityDetector.
+# Same "swap via config, not code" idea as models.yaml -- change a value here,
+# no code edit, no CLI flag to remember. See VoiceActivityDetector's own
+# docstring/field comments for what each one does and why its default is what
+# it is.
+#
+# Structure follows streaming_asr.yaml: engine-independent knobs at the top
+# level, engine-specific knobs in a block named after the engine, and only the
+# selected engine's block is read. `threshold` lives in the blocks rather than
+# at the top level on purpose -- see the ten-vad block.
 
-# Measured on the native-Windows box's USB microphone with
-# scripts/_calibrate_vad_threshold.py (real room tone as the negative case, a
-# known utterance mixed onto it as the positive one):
+# === engine ===================================================================
+# Which VAD model runs.
 #
-#   thresh   room frames flagged speech   segment closes after speech ends
-#     0.25              97.3%             never (max_speech_duration forces it)
-#     0.30              27.2%             -- (fragments the utterance)
-#     0.40               0.0%             1.68s
-#     0.50               0.0%             0.81s
+#   ten-vad      DEFAULT. Every tuned number below was measured against it, and
+#                it is the only engine this project has calibrated.
+#                ⚠️ Its licence is "Apache License v2.0 with additional
+#                conditions": commercial use is explicitly permitted and an
+#                end-user application is the case it carves out, but condition 1
+#                forbids deploying it "in a way that competes with Agora's
+#                offerings ... including without limitation enabling any third
+#                party to develop or deploy Applications". That is a term to
+#                agree to, not a technical setting -- THIRD-PARTY-NOTICES.md
+#                §2.3 has the verbatim text. Also note the checkpoint sherpa-onnx
+#                ships is a degraded export: its own ONNX metadata says "It uses
+#                0 as the pitch feature, which may degrade the performance."
 #
-# This replaces an earlier 0.25, which had been lowered because TEN-VAD missed
-# speech on the old WSL2/WSLg passthrough mic. On real hardware that value is
-# actively broken: at 0.25 the model reports speech through *silence*, so the
-# segment never finalizes and the turn never ends -- the user speaks and gets
-# no reply at all. Detection was never the real problem; at 0.5 this mic
-# detects the reference utterance down to peak 0.04 (SNR 2.9 dB, i.e. clearly
-# quiet speech) with onset landing within 0.04s of the true one.
+#   silero-vad   MIT, no additional conditions. Present so the licence question
+#                above never becomes a code change under time pressure --
+#                switching is one line here. UNCALIBRATED on this hardware: the
+#                threshold measurement below does not transfer, and this project
+#                has never compared the two on its own audio.
 #
-# Device dependent, so re-run the calibration script rather than copying this
-# number to a different microphone -- both failure directions are real.
-threshold: 0.5
+# Nothing here recommends switching. This exists so the choice stays a config
+# value.
+engine: ten-vad
+
 min_silence_duration: 0.5
 min_speech_duration: 0.15
 max_speech_duration: 20.0
@@ -65,3 +75,42 @@ barge_in_confirm_ms: 250
 endpoint_grace_ms: 800
 endpoint_grace_min_ms: 300
 adaptive_endpoint_grace: true
+
+# === ten-vad ==================================================================
+ten-vad:
+  model_path: models/ten-vad/ten-vad.onnx
+
+  # Measured on the native-Windows box's USB microphone with
+  # scripts/_calibrate_vad_threshold.py (real room tone as the negative case, a
+  # known utterance mixed onto it as the positive one):
+  #
+  #   thresh   room frames flagged speech   segment closes after speech ends
+  #     0.25              97.3%             never (max_speech_duration forces it)
+  #     0.30              27.2%             -- (fragments the utterance)
+  #     0.40               0.0%             1.68s
+  #     0.50               0.0%             0.81s
+  #
+  # This replaces an earlier 0.25, which had been lowered because TEN-VAD missed
+  # speech on the old WSL2/WSLg passthrough mic. On real hardware that value is
+  # actively broken: at 0.25 the model reports speech through *silence*, so the
+  # segment never finalizes and the turn never ends -- the user speaks and gets
+  # no reply at all. Detection was never the real problem; at 0.5 this mic
+  # detects the reference utterance down to peak 0.04 (SNR 2.9 dB, i.e. clearly
+  # quiet speech) with onset landing within 0.04s of the true one.
+  #
+  # Device dependent, so re-run the calibration script rather than copying this
+  # number to a different microphone -- both failure directions are real.
+  threshold: 0.5
+
+# === silero-vad ===============================================================
+silero-vad:
+  model_path: models/silero-vad/silero_vad.onnx
+
+  # sherpa-onnx's own default, NOT a measurement. The 0.5 in the ten-vad block
+  # above happens to be the same number but is not the same fact -- that one came
+  # out of _calibrate_vad_threshold.py against this microphone's room tone, and a
+  # different model's probabilities are not on the same scale. Re-run the
+  # calibration before trusting this, and note the failure is asymmetric: too low
+  # and the model reports speech through silence, so the segment never finalizes
+  # and the turn never ends. That has happened here.
+  threshold: 0.5
