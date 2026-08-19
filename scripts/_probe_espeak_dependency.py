@@ -1,9 +1,14 @@
 """How hard does sherpa-matcha-ko depend on espeak-ng-data, and how does it fail?
 
 Why this is a script and not a test: it needs the 18MB espeak-ng-data bundle and
-a 74MB acoustic model, and one of its three cases *terminates the interpreter*,
-which pytest cannot survive. It exists so the finding in
+a 74MB acoustic model, and it exists so the finding in
 docs/output/research-delta-20260818.md §13.4 stays reproducible.
+
+What it now checks is that SherpaMatchaTts._check_data_dir gets there first. Both
+bad cases used to abort the interpreter from C -- rc=1, no traceback, nothing for
+try/except -- and one of them (a host with a system espeak-ng installed at
+/usr/share/espeak-ng-data) would instead have succeeded silently against the
+wrong phoneme tables. A C-ABORT line in the output means that guard was bypassed.
 
 ⚠️ The methodological trap, which cost a wrong answer the first time: espeak-ng
 is a process-global singleton (espeak_ng_Initialize / espeak_ng_InitializePath).
@@ -69,13 +74,20 @@ def main() -> int:
         )
         ok = next((l for l in p.stdout.splitlines() if l.startswith("__OK__")), None)
         if ok:
-            print("%-8s %s" % (name, ok[len("__OK__"):].strip()))
-        else:
-            last = [l for l in (p.stdout + p.stderr).splitlines() if l.strip()][-1:]
-            print("%-8s DIED rc=%d, no Python exception -- %s"
-                  % (name, p.returncode, last[0][:120] if last else "(no output)"))
+            print("%-8s OK       %s" % (name, ok[len("__OK__"):].strip()))
+            continue
+        combined = p.stdout + p.stderr
+        lines = [l for l in combined.splitlines() if l.strip()]
+        last = lines[-1][:110] if lines else "(no output)"
+        # The distinction that matters: our guard raises a Python exception we
+        # can see and act on; espeak-ng aborts the interpreter and leaves only a
+        # C-level message. Before SherpaMatchaTts._check_data_dir existed, both
+        # of the bad cases were the second kind.
+        kind = "PY-RAISE" if "Traceback (most recent call last)" in combined else "C-ABORT "
+        print("%-8s %s rc=%d -- %s" % (name, kind, p.returncode, last))
     print()
-    print("Expected: missing/empty die at the C level (uncatchable); good synthesizes.")
+    print("Expected: missing/empty -> PY-RAISE from SherpaMatchaTts._check_data_dir;")
+    print("          good -> OK. A C-ABORT means the Python guard was bypassed.")
     print("See docs/output/research-delta-20260818.md §13.4")
     return 0
 

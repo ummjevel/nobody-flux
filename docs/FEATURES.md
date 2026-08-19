@@ -204,7 +204,12 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | `sherpa-onnx` 상한 없었음 | **수정** | 핀이 `>=1.13.4`(상한 없음)이라 2.0.0 출시 후 새 설치가 기본 TTS를 조용히 깨뜨릴 수 있었다 → `>=1.13.4,<2`로 상한 추가(`pyproject.toml`, `requirements/windows-cpu.txt`) |
 | `data_dir` 부재 = **프로세스 사망** | **실측** | 잘못된/빈 `data_dir` → rc=1, **Python 예외 없음**(C 레벨 abort, try/except로 못 잡음). TTS만 degrade되는 게 아니라 에이전트 전체가 종료. 먼저 하드코딩 `/usr/share/espeak-ng-data`로 폴백하므로 **리눅스 타깃에선 시스템 espeak 사전을 쓸 위험** |
 | espeak 측정 시 프로세스 분리 필수 | **실측 — 측정법** | espeak-ng은 프로세스 전역 싱글턴(`espeak_ng_Initialize`). 한 프로세스에서 정상 경로를 먼저 초기화하면 뒤이은 잘못된 경로가 그 상태를 재사용해 **거짓 통과**한다(처음 이렇게 재서 "없어도 동일 오디오"라는 오답을 얻었다) |
-| GPL-3.0 고지·소스 제공 | **미해결 — 사람 판단** | `models/sherpa-matcha-en/`에 `LICENSE`/`COPYING`이 **재귀 탐색으로도 없음**(251바이트 README뿐). 기기 이미지 배포 시 의무 발생. §13.1 때문에 **프리셋 선택과 무관** |
+| GPL-3.0 고지·소스 제공 | **부분 해결** | `THIRD-PARTY-NOTICES.md` 신규 — 라이선스 전문 위치와 **대응 소스 위치**(espeak-ng `dictsource/`·`phsource/`) 명시. **실측: 모델 번들 15개 중 라이선스 파일을 싣는 건 3개**이고 하나는 URL 한 줄(`sense-voice`), 하나는 가중치에 틀린 MIT(Supertonic 샘플코드용). 이미지에 무엇을 동봉해야 충분한지는 **여전히 법무 판단** |
+| espeak 데이터 경로 우선순위 | **1차확인 — 소스** | `espeak_ng_InitializePath`: **넘긴 경로 → `ESPEAK_DATA_PATH` → `$HOME` → 컴파일 기본값**. 즉 우리가 유효한 경로를 주면 **env var도 레지스트리도 못 덮어쓴다** → `ESPEAK_DATA_PATH`는 위험이 아니다(검색 요약은 반대로 말했고 소스가 반박) |
+| ~~시스템 `/usr/share/espeak-ng-data` 폴백 위험~~ | **해결 — 가드** | `check_data_path`가 **디렉터리 여부만** 보고 phontab 유무는 안 본다 → 존재하지만 빈 디렉터리가 통과 후 사망. `SherpaMatchaTts._check_data_dir`이 4개 파일을 먼저 검증해 `FileNotFoundError`를 던진다. 프로브 재실행으로 두 실패 모드 모두 `C-ABORT`→`PY-RAISE` 확인. 리눅스에서의 **조용한 오발음**도 같이 막힘 |
+| 2.0.0 lexicon 마이그레이션 | **조사 완료 — 착수는 형식 확정 후** | 프론트엔드가 **ONNX 메타데이터로** 선택된다(`has_espeak`→lexicon 무시, 분기 없으면 `EXIT(-1)`). matcha-ko는 `has_espeak: 1` → **`lexicon` 설정해도 무시됨**. 업스트림의 "모델마다 lexicon.txt 추가"는 **자기 레포 모델 한정** → 우리 건 우리가 만들어야. lexicon 조회는 UTF-8 **문자 단위**·OOV는 조용히 버림 → 한국어는 **음절 단위**가 맞고 음절 경계 음운규칙을 잃는다 |
+| espeak 한국어 규칙의 실제 규모 | **1차확인 — 디스크** | `ko_dict` **47KB** (en 167KB, cmn 1.5MB), `lang/ko`는 **51바이트**(name/language/pitch/intonation 4줄뿐). 레포가 예전부터 적어둔 "한국어 규칙 약함"의 정량 근거 — 대체 시 잃을 것도 그만큼 적다 |
+| ⚠️ 가짜 espeak 번들로 테스트하면 pytest가 죽는다 | **실측 — 측정법** | 0바이트 `phontab`을 만들어 가드를 통과시키면 espeak이 C에서 파싱하다 **프로세스를 abort**한다 → 실패 리포트 없이 출력만 잘리고 exit 1. 가드 테스트는 `__post_init__`을 통하지 말고 duck-typed stub으로 메서드를 직접 부를 것 |
 | **프롬프트 프리픽스 KV를 디스크에 저장** | **실측 — 구현 완료** | `warm_up()`이 `llama_state_seq_save_file`/`load_file`로 스냅샷. 재시작 후 warm_up **3.29s → 0.14s**(24배). 프리픽스 648토큰, 스냅샷 **75.6MB**(= 648 × 28층 × 2(K+V) × 1024 × 2B = 74.3MB, 산술 일치). 검증: `scripts/_verify_kv_prefix.py` |
 | KV 복원이 실제로 맞는지 | **실측 — 맞다** | 복원 상태에서 greedy 생성한 답이 정상 프리필 답과 **문자 단위 동일**. 이 확인이 필요한 이유: 복원이 어긋나면 예외가 아니라 **그럴듯한 오답**이 나온다 |
 | ⚠️ 프리픽스 토큰화가 `create_completion`과 달랐다 | **실측 — 버그 수정** | `Llama.tokenize` 기본값은 `add_bos=True, special=False`인데 `_create_completion`은 `add_bos=False, special=True`를 쓴다. 기본값으로 재면 `<\|im_start\|>`가 특수토큰 1개가 아니라 **리터럴 텍스트**가 되어 **744 vs 659토큰**으로 갈렸다. 조용한 실패 — 스냅샷을 복원해도 `generate()`가 거부하고 재프리필해서 **이득이 0**이 된다 |
@@ -221,7 +226,7 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | 숫자·로마자 확장 (`korean_tn.expand`) — 텍스트 변환 | **있음** (63개 테스트) | 한자어/고유어 수사, 만·억 그룹, 유월·시월, 소수·퍼센트·전화번호, 두문자어 |
 | 같은 것 — **로마자·고유어 수사 실제 발음** | **실측 개선** | 두 프리셋 모두: `ABC`→"엠비이"/"W파이 Premier번 on ABCia" 였다가 "에이비시"로. `23살`→"2십3 살"/"이샘살" 이었다가 "스물세 살"로 |
 | 같은 것 — **한자어 수사 실제 발음** | **미검증** | ⚠️ ASR 라운드트립으로는 **원리적으로 검증 불가**. SenseVoice가 역정규화를 해서 올바른 "이십 분"을 "20분"으로 되돌린다 = 판정자가 검증 대상 변환을 되돌린다. `"만 이천 원"`이 `"120 원"`으로 돌아온 사례가 있는데 TTS 탓인지 ASR 탓인지 **듣지 않고는 알 수 없다** → 아래 사람 검증 목록으로 |
-| 순수 로직 단위 테스트 | **있음** (296개, <3s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, 스레드 예산, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
+| 순수 로직 단위 테스트 | **있음** (306개, <3s) | `tests/` — 가중치·오디오 장치 불필요. 컨트롤러 상태기계, VadStream duration, chunker, memory 파싱/consolidation, storage 쿼리, `_AudioRing`, resample, 스레드 예산, backchannel/LocalAgreement/grace. 파라미터 실측과는 다른 축: 이건 "코드가 명세대로 동작"만 보증한다 |
 | `barge_in_confirm_ms` (250) | 추정치 | 실제 맞장구/끼어들기 발화 녹음 필요 (`_calibrate_turn_params.py`) |
 | `BACKCHANNEL_MAX_DURATION_S` | 추정치 | 위와 같음 — 단, 게이트에 들어가는 duration이 pre-roll 제외한 실발화 길이(`speech_duration_s`)라는 것 자체는 회귀 테스트로 고정(2026-08-14 전까지는 pre-roll 포함 길이가 들어가 게이트가 죽은 코드였다) |
 | ~~`is_empty_transcript`의 `len <= 1` 섀도잉~~ | **수정 (2026-08-19)** | 한 글자라 `BACKCHANNEL_WORDS` 20개 중 **10개(네 넵 아 어 예 오 와 음 응 헐)가 도달 불가**였다 = **어시스턴트가 "네"를 못 들었다**. 그리고 "뭐?"·"왜?"를 침묵으로 버려 talk.py의 마이크 사망 경고를 거짓 발동시켰다. 이제 "짧은가"가 아니라 **"조각인가"**를 묻는다 — `ONE_SYLLABLE_WORDS = {뭐, 뭘, 왜}`(→FINISHED)와 `BACKCHANNEL_WORDS`(→WAIT)는 통과, 나머지 1글자는 그대로 EMPTY. 회귀 테스트로 **모든 맞장구 단어의 도달 가능성**을 고정 |
@@ -326,7 +331,7 @@ ASR로 폴백하므로 대화는 계속 된다 — 다만 그 폴백이 **완전
 ## 사람이 직접 해야 할 검증 (미완료)
 
 **여기 있는 건 자동화할 수 없다.** 사람이 말하고, 듣고, 판단해야 하는 것들이다. `tests/`의
-296개 테스트는 "코드가 명세대로 동작한다"만 보증하며 아래 어느 것도 대신하지 못한다.
+306개 테스트는 "코드가 명세대로 동작한다"만 보증하며 아래 어느 것도 대신하지 못한다.
 이 목록이 비기 전까지, 턴테이킹 경로의 동작은 **설계상 그럴 것**이지 **확인된 것**이 아니다.
 
 1~4번은 **같은 세션에서 한 번에** 하는 게 맞다. 말을 걸어야 1·2번이 되고, 그 부산물로 3번의

@@ -403,7 +403,58 @@ class SherpaMatchaTts:
     speaker_id: int = 0
     speed: float = 1.0
 
+    # The four files espeak-ng loads out of data_dir. Checked by name here
+    # because espeak's own check is weaker than it looks -- see _check_data_dir.
+    _ESPEAK_DATA_FILES = ("phontab", "phonindex", "phondata", "intonations")
+
+    def _check_data_dir(self) -> None:
+        """Fail here, in Python, rather than letting espeak-ng decide how to fail.
+
+        espeak_ng_InitializePath tries the path it is given first and only falls
+        back if that path is not a directory (verified in espeak-ng's
+        src/libespeak-ng/speech.c: explicit path, then $ESPEAK_DATA_PATH, then
+        $HOME/espeak-ng-data, then the compiled-in PATH_ESPEAK_DATA -- which
+        sherpa-onnx built as /usr/share/espeak-ng-data). So a valid path wins
+        outright and no environment variable can redirect us. Good.
+
+        The two failure shapes are the problem:
+
+          - A path that is not a directory falls through to the compiled-in
+            default. On this dev box that does not exist, so espeak aborts the
+            *process* -- rc=1, no Python exception, nothing for try/except to
+            catch (measured: scripts/_probe_espeak_dependency.py). The agent
+            exits instead of degrading.
+          - On a Linux target with a system espeak-ng installed, that same
+            fallback silently *succeeds* against /usr/share/espeak-ng-data,
+            using whatever phoneme tables that version ships instead of ours.
+            Wrong pronunciation with no error anywhere.
+
+        espeak's own guard cannot separate these: check_data_path() only asks
+        whether the path is a directory, not whether the phoneme tables are in
+        it. So an existing-but-empty directory passes it and dies later at
+        phontab. Checking for the actual files is what makes the error land here,
+        naming the missing file, while the process is still ours to fail in.
+        """
+        data_dir = Path(self.data_dir)
+        if not data_dir.is_dir():
+            raise FileNotFoundError(
+                "matcha data_dir (espeak-ng-data) not found: %s. This model uses "
+                "espeak-ng as its G2P and cannot synthesize without it; run "
+                "scripts/setup_*.sh to fetch the matcha-en bundle. See "
+                "THIRD-PARTY-NOTICES.md §1.1." % data_dir
+            )
+        missing = [f for f in self._ESPEAK_DATA_FILES if not (data_dir / f).is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "matcha data_dir %s exists but is missing espeak-ng phoneme "
+                "tables: %s. Left to espeak-ng this either kills the process or, "
+                "on a host with a system espeak-ng, silently uses that one "
+                "instead. See THIRD-PARTY-NOTICES.md §1.1."
+                % (data_dir, ", ".join(missing))
+            )
+
     def __post_init__(self):
+        self._check_data_dir()
         matcha_config = sherpa_onnx.OfflineTtsMatchaModelConfig(
             acoustic_model=str(self.acoustic_model),
             vocoder=str(self.vocoder),

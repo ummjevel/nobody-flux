@@ -1032,12 +1032,35 @@ sherpa-onnx issue [#3731](https://github.com/k2-fsa/sherpa-onnx/issues/3731)
 두 가지가 나온다:
 
 1. **잡을 수 없는 실패다.** `try/except`에 걸리지 않고 프로세스가 그대로 종료된다.
-   TTS만 degrade되는 게 아니라 **음성 에이전트 전체가 죽는다**. 설치 스크립트가
-   matcha-en 번들을 빼먹으면 조용한 오작동이 아니라 즉사이므로, 그 점은 오히려 낫다.
-2. **하드코딩된 `/usr/share/espeak-ng-data`로 먼저 폴백한다.** 리눅스 타깃(CM4/CM5)에서
-   시스템 espeak-ng이 깔려 있으면 **우리가 지정한 경로가 아니라 시스템 사전을 쓸 수
-   있다** — 버전이 다르면 음소가 달라지고, 음질 저하의 원인을 우리 설정에서 찾게 된다.
-   Pi 이미지 구성 시 확인 항목.
+   TTS만 degrade되는 게 아니라 **음성 에이전트 전체가 죽는다**.
+2. **하드코딩된 `/usr/share/espeak-ng-data`로 폴백한다.** 리눅스 타깃(CM4/CM5)에서
+   시스템 espeak-ng이 깔려 있으면 위 실패가 **에러가 아니라 조용한 성공**이 된다 —
+   우리 경로가 아니라 시스템 사전을 쓰고, 버전이 다르면 음소가 달라진다. 개발 박스에는
+   `/usr/share`가 없어서 죽지만, 배포 타깃에서는 안 죽고 잘못 발음할 수 있다.
+
+**경로 우선순위를 소스로 확정했다** [1차확인, espeak-ng `src/libespeak-ng/speech.c`
+`espeak_ng_InitializePath`] — 이게 위 2번의 범위를 좁힌다:
+
+```c
+if (check_data_path(path, 1)) return;                          // 넘긴 경로가 최우선
+if (check_data_path(getenv("ESPEAK_DATA_PATH"), 1)) return;     // 그 다음 env
+if (check_data_path(getenv("HOME"), 0)) return;                 // 그 다음 $HOME
+strcpy(path_home, PATH_ESPEAK_DATA);                            // 마지막이 컴파일 기본값
+```
+
+→ **`ESPEAK_DATA_PATH`는 위험이 아니다.** 우리가 넘긴 경로가 유효하면 env var도
+레지스트리도 `/usr/share`도 우리를 덮어쓸 수 없다. (검색 요약은 env var가 최우선이라고
+했는데 소스가 반박한다 — 요약을 믿지 않은 게 맞았다.)
+
+**단 `check_data_path`는 디렉터리인지만 본다** — `phontab` 유무는 확인하지 않는다.
+그래서 *존재하지만 비어 있는* 디렉터리는 이 검사를 통과하고 나중에 phontab에서 죽는다.
+
+→ **조치: 우리가 파이썬에서 먼저 검증한다.** `SherpaMatchaTts._check_data_dir`이
+디렉터리 존재 + `phontab`/`phonindex`/`phondata`/`intonations` 4개 파일을 확인하고
+`FileNotFoundError`를 던진다. 이제 두 실패 모드 모두 **C 레벨 abort가 아니라 파이썬
+예외**로 나오고(프로브 재실행으로 확인: `PY-RAISE`), 리눅스에서의 조용한 오발음도
+같이 막힌다. 회귀 테스트 9개(`tests/test_tts_data_dir_guard.py`) — 가중치 불필요,
+가드가 `__post_init__` 첫 줄이라 모델을 열기 전에 던지기 때문이다.
 
 ### 13.5 고지 의무를 지금은 기계적으로 못 지킨다 [1차확인]
 
@@ -1064,6 +1087,56 @@ sherpa-onnx issue [#3731](https://github.com/k2-fsa/sherpa-onnx/issues/3731)
 | 2 | `tts.py`의 Supertonic docstring에 "런타임은 여전히 링크한다" 명시 | 반영 |
 | 3 | `models.yaml`의 `data_dir` 주석에 GPL-3.0 + 2.0.0 좌초 위험 명시 | 반영 |
 | 4 | sherpa-onnx 버전 락 사유에 #3731 추가 | 반영 |
-| 5 | 배포 시 GPL-3.0 고지·소스 제공 | **미해결. 사람 판단 필요** |
-| 6 | Pi 이미지에서 시스템 `/usr/share/espeak-ng-data` 폴백 확인 | **미해결. 실기 필요** |
-| 7 | 2.0.0 대비 한국어 `lexicon.txt` 경로 조사 | **미해결. 2.0.0 릴리스 후** |
+| 5 | 배포 시 GPL-3.0 고지·소스 제공 | **부분 해결** — `THIRD-PARTY-NOTICES.md` 신규(라이선스 전문 위치 + 대응 소스 위치 명시). 이미지에 무엇을 어떤 형태로 동봉해야 충분한지는 **여전히 법무 판단** |
+| 6 | Pi 이미지에서 시스템 `/usr/share/espeak-ng-data` 폴백 확인 | **해결** — 우선순위를 소스로 확정(넘긴 경로가 최우선)하고 `_check_data_dir` 가드로 막음. 실기 불필요해짐 |
+| 7 | 2.0.0 대비 한국어 `lexicon.txt` 경로 조사 | **조사 완료, 착수는 2.0.0 이후** — §13.8 |
+
+### 13.8 2.0.0 마이그레이션 경로 — 조사 완료 (2026-08-19)
+
+`OfflineTtsMatchaModelConfig`에 **`lexicon` 필드가 1.13.4에 이미 있다** [1차확인, 도입부
+introspection]. 처음엔 그래서 "지금도 espeak 없이 갈 수 있다"고 봤는데, **설정에 필드가
+있는 것과 모델이 그걸 쓰는 것은 별개다.**
+
+**프론트엔드는 설정이 아니라 모델의 ONNX 메타데이터로 선택된다**
+[1차확인, `offline-tts-matcha-impl.h` `InitFrontend()`]:
+
+| 메타데이터 | 프론트엔드 | 쓰는 것 |
+|---|---|---|
+| `is_zh_en` | `MatchaTtsLexicon` | lexicon + data_dir |
+| `jieba` | `CharacterLexicon` | **lexicon만** — data_dir 불필요 |
+| `has_espeak` | `PiperPhonemizeLexicon` | **data_dir만** — lexicon 무시 |
+| 그 외 | — | `SHERPA_ONNX_EXIT(-1)` |
+
+우리 `matcha-ko`의 메타데이터는 `has_espeak: 1`, `jieba: 0` [1차확인, onnxruntime로 직접
+읽음] → **`lexicon`을 설정해도 무시된다.** 그리고 `PiperPhonemizeLexicon`은 조건 분기 없이
+항상 `CallPhonemizeEspeak`을 부른다 [1차확인].
+
+**2.0.0에서 espeak 분기가 사라지면** `has_espeak` 모델은 마지막 줄로 떨어진다 —
+즉 프로세스 종료다. 업스트림 계획 [1차확인, #3731 댓글, csukuangfj 2026-07-15]:
+
+> "We will not delete any files or modify the existing .onnx artifacts within the model
+> repository; instead, a lexicon.txt file will be added to every model directory."
+
+**그건 업스트림 모델 레포 이야기다.** `matcha-ko`는 우리 모델이고 그 레포에 없다 →
+**lexicon.txt를 우리가 만들어야 한다.**
+
+착수 전 판별해둔 것:
+
+- **입도.** `Lexicon`/`CharacterLexicon`은 입력을 `SplitUtf8`로 **문자 단위**로 쪼개
+  조회하고 OOV는 경고 후 **조용히 버린다**(`"OOV %s. Ignore it!"` → `continue`)
+  [1차확인, `lexicon.cc`]. 한국어에는 **음절 단위 lexicon이 구조적으로 맞다** —
+  한글이 음절 문자이고, 어절 단위로는 교착어라 어휘가 무한하다. 대신 음절 경계를 넘는
+  음운 규칙(연음·자음동화: 국물→궁물)을 잃는다.
+- **잃을 게 적을 가능성이 높다.** espeak의 한국어는 얇다 — `ko_dict` 47KB
+  (`en_dict` 167KB, `cmn_dict` 1.5MB), `lang/ko`는 **51바이트**로 `name`/`language`/
+  `pitch`/`intonation` 네 줄뿐이다 [1차확인, 디스크]. 레포가 예전부터 적어둔
+  "espeak-ng 한국어 규칙 약함"(`tts-conversational-build-design.md:149`)과
+  "`20`을 이상하게 음소화한다"(`code-review-20260814.md:262`)의 정량적 근거다.
+- **지금 만드는 게 유리하다.** espeak-ng이 아직 링크돼 있는 동안 음소를 뽑아 lexicon을
+  생성해두는 것이 2.0.0 이후보다 쉽다. 단 **2.0.0이 `has_espeak` 모델에 대해 어떤
+  lexicon 형식을 기대할지가 아직 확정되지 않았다** — 그게 정해지기 전에 만들면 형식이
+  안 맞을 수 있다. **그래서 지금은 만들지 않고, 근거만 확정해둔다.**
+
+**우리 선택지는 셋이고 전부 열려 있다:** (a) `<2`에 머문다(현재), (b) 2.0.0 형식이
+확정되면 음절 lexicon을 생성한다, (c) Supertonic으로 간다 — character-level이라 이 문제
+자체가 없다. §13.3의 "v3의 진짜 장점은 전방 호환성"이 이 표에서 나온 말이다.

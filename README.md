@@ -10,9 +10,10 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 [`docs/FEATURES.md`](docs/FEATURES.md), LLM 선정 근거·라이선스는
 [`docs/llm-conversational-selection.md`](docs/llm-conversational-selection.md), 기억(개인화) 설계는
 [`docs/memory-design.md`](docs/memory-design.md), 끼어들기 설계는
-[`docs/barge-in-design.md`](docs/barge-in-design.md) 참고.
+[`docs/barge-in-design.md`](docs/barge-in-design.md), 서드파티 라이선스 고지와
+**아직 확인되지 않은 가중치 라이선스**는 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 참고.
 
-> ⚠️ **턴테이킹 경로는 아직 사람이 말해보며 검증하지 않았다** — 자동 테스트 146개는 코드
+> ⚠️ **턴테이킹 경로는 아직 사람이 말해보며 검증하지 않았다** — 자동 테스트 306개는 코드
 > 정확성까지만 보증한다. 남은 항목은
 > [사람이 직접 해야 할 검증](docs/FEATURES.md#사람이-직접-해야-할-검증-미완료) 체크리스트에.
 
@@ -158,7 +159,7 @@ sqlite3 data/conversations.db "SELECT turn_index, user_text, reply_text, asr_ms,
 ### 6. 테스트
 
 ```bash
-uv run pytest        # 296개, 3초 미만  (윈도우: .venv-win\Scripts\python.exe -m pytest)
+uv run pytest        # 306개, 3초 미만  (윈도우: .venv-win\Scripts\python.exe -m pytest)
 ```
 
 **가중치도 오디오 장치도 필요 없다** — 순수 로직(턴 컨트롤러 상태기계, VAD 링버퍼, 문장 청커,
@@ -198,7 +199,7 @@ scripts/
   _calibrate_vad_threshold.py _calibrate_aec_delay.py _calibrate_turn_params.py
   _debug_vad_mic.py _debug_segment.py _debug_silence.py _debug_roomtone.py
   setup_{local,server,mac,common}.sh  setup_windows.ps1  env.sh
-tests/            # pytest 296개 — 가중치·오디오 장치 불필요, 3초 미만
+tests/            # pytest 306개 — 가중치·오디오 장치 불필요, 3초 미만
 configs/          # models, voices, vad, audio, turn_detector, streaming_asr,
                   # runtime(CPU 예산), persona_scenarios(멀티턴 평가)
 docs/             # 리서치, 기능 정의, LLM 선정, 코드리뷰, 기억/barge-in/TTS 설계
