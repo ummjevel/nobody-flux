@@ -228,6 +228,14 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | CM4에서 죽는 것 / 사는 것 | **실측** | **LLM만 죽는다.** Matcha-TTS는 Pi 4 실측 RTF 0.411@4T로 실시간. 단 우리 `runtime.yaml`이 TTS에 **1스레드**만 줘서 CM4 환산 RTF ≈1.13 → **스테이지 배분 재검토 필요**(설정 문제, 보드와 무관) |
 | 🚨 **기본 ASR 가중치 라이선스** | **미확인 → 확인됨, 문제 있음** | `models/sense-voice/LICENSE`가 링크 한 줄(`Ref to FunASR#license`). Apache/MIT 아님 — **FunASR Model Open Source License v1.1**(Alibaba). 비교용이 아니라 **기본값**이다. 제품화 전 법무 확인 |
 | Smart Turn ARM 추론 시간 | **미측정 — 예산에 없음** | 우리 전제는 "CPU ~12ms"지만 Graviton 1 vCPU에서 **159ms** 보고. VAD 침묵 뒤 실행이라 턴 지연에 그대로 더해진다 → CM4 측정 항목에 추가 |
+| ⚠️ **Smart Turn V2의 `ACC_incp` 62%** | **2차 — 제3자 측정** | Easy Turn 논문 표(RTX 4090). "incomplete"(생각 중간 멈춤) 판정이 **우리 적응형 grace가 정확히 의존하는 신호**다(`grace_frames_for_prob`). 단서: (a) 그들의 테스트셋, (b) **V2이고 우리는 v3.2**. 그래도 `complete_threshold: 0.5`가 아직 스톡값(`detector.py:50` "not tuned here")인 상황과 겹쳐 **임계값 스윕 우선순위가 올라간다** |
+| 턴테이킹 학술 대안 (2025–2026) | **조사 완료 — 대안 없음 확인** | Easy Turn(공개·Apache-2.0인데 **850MB·263ms·2559MB @RTX4090**, 한국어 언급 없음), Phoenix-VAD(가중치 미공개, Qwen2.5-0.5B, 50ms @A6000), MuVAP(**카메라 필요**), 다국어 VAP(영·중·일, **한국어 없고 전이도 안 된다고 논문이 명시**). §2 결론이 **검증된 유지**로 승급 |
+| 4-state 턴 어휘의 외부 근거 | **1차확인** | Easy Turn이 예측하는 것이 *complete / incomplete / backchannel / wait* — 우리 `TurnVerdict` 네 상태와 독립적으로 수렴. 트랙 C-1이 "TEN의 3개가 아니라 4개"로 간 판단의 외부 검증 |
+| **라벨 없이 EOT 타깃 만들기** | **경로 확보 — 미착수** | Next-Turn: 학습 타깃을 *time-to-next-speech-onset*으로 두면 **"require no additional annotation"**(타임스탬프에서 유도), 320ms 내 정확도 **+25.9%p**. Thai EOT: **YODAS 자막**으로 비영어 EOT를 부트스트랩(종결어미 같은 언어별 단서 활용). → `labels.json`·"한 글자 네"가 **"라벨이 없어서 못 한다"는 더 이상 정확한 서술이 아니다** |
+| CM5 캐리어 호환성 | **1차확인 — 데이터시트 원문** | 폼팩터 동일, **23핀 재배치**(Appendix B Table 14). 우리에게 유리: 최대 변경인 **CAM0·DSI0가 USB 3.0으로** 바뀌는데 카메라·DSI를 안 쓰므로 무해하고 USB 3.0 포트 2개를 얻는다. 주의 2건 — **ADC 2채널 소멸**(핀 94/96 → USB-C PD CC), **전력 5V 2.5A**. CM4를 안 사기로 했으므로 마이그레이션 비용이 아니라 **설계 입력** |
+| CM5 = A76 @2.4GHz | **1차확인** | BCM2712 quad-core **Cortex-A76**, 2.4GHz, LPDDR4x-4267 ECC. §10.1의 근거(A72는 Armv8.0-A로 dotprod 없음 → llama.cpp 빠른 경로 전부 상실)에 대해 **A76은 Armv8.2-A로 dotprod 보유**. 클럭도 1.6배 |
+| ⚠️ CM5 전력이 스레드 배분과 얽힌다 | **1차확인 — 신규** | 데이터시트: *"accommodate 5V at up to 2.5A"*, 완화책으로 *"lowering the CPU clock rate"*를 직접 제시. 우리 워크로드가 4코어를 다 쓰는 LLM 디코드라 피크가 실제로 걸릴 쪽 → `runtime.yaml` 스레드 배분이 성능 문제만이 아니라 **전력 문제이기도 하다** |
+| PDF 텍스트 추출 | **해결 — 방법** | WebFetch가 CM5 데이터시트에서 구조 메타데이터만 뱉었다. 저장된 PDF에 `uv run --no-project --with pypdf`로 임시 의존성을 붙여 뽑았다. **`--no-project` 필수** — 프로젝트 안에서 그냥 `uv run`을 쓰면 `.venv`를 건드리려다 실패한다. §6-5의 "PDF 추출 실패"를 이 방법이 닫는다 |
 | LLM 프리필 비용 (턴당) | **실측** | 고정 ~117ms + 토큰당 ~11.6ms (3스레드, 약 86 tok/s). 정적 프리픽스 1144토큰은 `warm_up()`이 이미 지불 → 턴당 남는 건 발화 3~16토큰. 동일 프롬프트 재호출은 **4ms** |
 | 프리픽스 안정성 | **불변식** | ⚠️ 프롬프트 앞부분이 턴마다 바뀌면(시간 표시, 동적 메모리 위치 등) 위 4ms가 300ms로 돌아온다. 프리픽스를 안정적으로 유지하는 것이 진짜 레버다 |
 | 턴 판정 어휘 통합 (`turn/verdict.py`) | **있음** (동작 무변경, 등가성 테스트로 고정) | `FINISHED/UNFINISHED/WAIT/EMPTY`. vad.py·talk.py의 기존 조건과 1:1로 같음을 테스트로 증명 |

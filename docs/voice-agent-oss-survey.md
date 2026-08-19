@@ -236,7 +236,9 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
 | **Smart Turn v3** | 엔드포인터 | **O** | **O(23개어)** | 오디오 EOU | **BSD-2-Clause**¹ | ★★★ 이미 도입 |
 | **Supertonic 3** | TTS | **O**(ONNX int8) | **O**(31개어) | — | 코드 MIT / **가중치 OpenRAIL-M**² | ★★★ 프리셋 추가함, 기본 아님³ |
 | Kokoro-82M | TTS | O | **✗ 한국어 없음**⁴ | — | Apache-2.0 | ✗ 후보 아님 |
-| OpenLive | 온디바이스 캐스케이드 | O(WebGPU) | 모델 의존 | Smart Turn | 조사 미완 | ★ 신규 배포 아날로그 |
+| OpenLive | 온디바이스 캐스케이드 | O(WebGPU) | 모델 의존 | Smart Turn | **MIT**⁸ | ★★ 부품 구성이 우리와 거의 동일⁸ |
+| **Easy Turn** | 턴테이킹 4-state | **✗ 850MB / 263ms·2.5GB @RTX4090** | **✗ 언급 없음**(`lang: <CN>`) | 오디오+텍스트 이중모달 | Apache-2.0 | ✗ 채택 불가⁹ |
+| Phoenix-VAD / MuVAP / multilingual VAP | semantic EOT · VAP | ✗ (GPU / **카메라 필요**) | ✗ (영·중 / 영·중·일) | — | 가중치 미공개 | ✗ VAP 계열 종결⁹ |
 | Deepgram Flux | STT+EOT 통합 | **✗ 클라우드** | **✗**(10개어에 ko 없음) | 모델 내장 EOT | 프로프라이어터리 | ★★ 아이디어만⁵ |
 | livekit/turn-detector | 엔드포인터 | O(CPU) | **O(14개어)** | 텍스트 EOU | ⚠️ 프로프라이어터리 | ★ 폴백 후보 |
 | **Vosk (ko)** | 스트리밍 ASR | **O**(Kaldi online) | **O**(모델 1개뿐) | — | **Apache-2.0** | ★★ partial 전용 후보⁶ |
@@ -274,6 +276,9 @@ Bolna(텔레포니 우선), Dograh(Vapi/Retell 대체, 워크플로우). 클라�
   하한이 청크 크기(≈0.2~0.3s)다. 즉 chunked SenseVoice의 두 결함(1.29초 하한, 내용 뒤집힘)을
   동시에 없앤다. RAM ~300MB + 82MB 모델이 4GB에서 경합하는 게 미확인 리스크.
 ⁷ 한국어 CER 7.12~7.59, 진짜 80ms cache-aware 스트리밍, arm64 CPU 프리빌드까지 있어
+⁸ OpenLive는 MIT이고 부품 선택이 우리와 거의 같다(Silero VAD + Smart-Turn + Kokoro/Supertonic + ZipVoice). 훔칠 패턴: **end-of-turn 모델을 ASR 디바이스와 분리**해 ASR이 WebGPU에 있어도 Smart-Turn은 무조건 CPU EP에서 돌린다 (`research-delta-20260818.md` §11).
+⁹ 2026-08-19 학술 turn-taking 전수 조사 결과. Easy Turn은 유일하게 실제로 공개된 오픈 4-state 모델이고 Apache-2.0이지만 **850MB·263ms·2559MB가 전부 RTX 4090 기준**이고 한국어 언급이 없다(우리는 smart-turn-v3.2 int8 **8.7MB**). 다국어 VAP는 영·중·일뿐이고 논문 자신이 *"a monolingual VAP model trained on one language does not make good predictions when applied to other languages"*라고 적어 일본어 전용 우회로를 반박한다. MuVAP은 face track용 카메라가 필요해 오디오 전용 기기에 구조적으로 안 맞는다. → **Smart Turn v3 유지 결론이 검증됐다.** 상세는 `research-delta-20260818.md` §14.
+
   **우리 요구를 정확히 만족하는 유일한 모델**인데 CM4에서 RTF 8~16 추정으로 못 돈다.
   **Cortex-A72는 ARMv8.0-A라 DotProd·i8mm·FP16 산술이 전부 없어** 양자화 이득도 못 받는다.
   CM5/RK3588(A76 = ARMv8.2 + DotProd)로 올라가면 이게 정답이 된다 → 하드웨어 결정 인자.

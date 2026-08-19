@@ -300,20 +300,27 @@ Pi 5(A76, A72보다 빠름) ~20 tok/s prompt-eval, ~7 tok/s generation [2차]
 | 7 | Deepgram은 벤치마크가 아니라 **아이디어 출처**로 격하. 단 `eot_threshold=0.7`은 스윕 근거로 유지 | 한국어 미지원 + F1 주장은 벤더주장 |
 | 8 | `-cram` 기본 8192 MiB는 4GB 타깃에서 **명시적으로 낮춰야 함**을 기록 | [1차확인] |
 
-## 6. 아직 열린 질문 (조사 미완)
+## 6. 열린 질문의 현재 상태 (2026-08-19 갱신 — 5축 전부 종결)
 
-세션 한도와 WebSearch 예산(200/200) 소진으로 세 축이 중단됐다. 남은 것:
+원래 이 절은 "세션 한도와 WebSearch 예산 소진으로 중단된 축"의 목록이었다. 그 사유는
+지났고, 목록은 뒤의 절들이 하나씩 닫았는데도 열린 것처럼 남아 있었다. 실제 상태:
 
-1. **스트리밍 ASR 대안** — Vosk-ko 스트리밍 CPU RTF·한국어 CER, onnx-asr, FunASR streaming 한국어
-2. **한국어 CPU TTS 잔여 후보** — Piper 한국어 음성 유무, StyleTTS2/VITS/MeloTTS 한국어 커뮤니티
-   체크포인트, ZipVoice 한국어 추가 여부(현재 중/영만)
-3. **배포 아날로그 + per-core 병목** — OpenLive 상세, llama.cpp ARM 양자화(A72에 dotprod/i8mm이
-   **없다**는 점의 비용), 크로스턴 KV 캐시, CM5/RK3588 등 SBC 재검토,
-   Pi급에서 실제 측정된 E2E 왕복 사례
-4. **학술 turn-taking 2025–2026** — Next-Turn(2606.18094), Phoenix-VAD, Easy Turn(2509.23938),
-   MuVAP(2606.16731), multilingual VAP(2403.06487). **한국어 VAP 체크포인트는 발견되지 않았다**
-5. **부분 가설 불안정성 수치** — Shangguan et al.(2006.01416)의 UPSR 표를 PDF에서 추출 실패.
-   **적중률의 핵심 입력인데 미정량.** 우리 sherpa 스트림에서 직접 재는 게 빠르다
+| # | 축 | 상태 |
+|---|---|---|
+| 1 | 스트리밍 ASR 대안 (Vosk-ko, onnx-asr, FunASR streaming 한국어) | **닫힘 → §9** |
+| 2 | 한국어 CPU TTS 잔여 후보 (Piper 한국어, StyleTTS2/VITS/MeloTTS, ZipVoice) | **닫힘 → §11** (MeloTTS-Korean 발견, Piper 한국어는 NC) |
+| 3 | 배포 아날로그 + per-core 병목 (OpenLive, ARM 양자화, SBC 재검토) | **닫힘 → §10·§11** |
+| 4 | 학술 turn-taking 2025–2026 (Next-Turn, Phoenix-VAD, Easy Turn, MuVAP, VAP) | **닫힘 → §14** — §2 결론 유지, 그리고 VAP 계열 전체 종결 |
+| 5 | 부분 가설 불안정성 수치 (Shangguan et al. 2006.01416의 UPSR 표) | **측정으로 대체** — 아래 |
+
+**축 5는 "미완"이 아니라 "쓸 데가 없어짐"이다.** 이 수치를 원한 목적이 투기적 프리필의
+적중률 추정이었고, **트랙 C-2는 §8에서 우리 자체 측정으로 기각됐다**(프리필이 턴당 3~16토큰,
+절약 ~43ms 대비 비용 ~200ms). 게다가 이 절 자신이 "우리 sherpa 스트림에서 직접 재는 게
+빠르다"고 적었고 실제로 그렇게 쟀다(§7: 16개 중 8개 미커밋, 커밋된 내용이 재디코드로 뒤집힘).
+논문의 UPSR 표는 이제 어떤 결정의 입력도 아니다. **PDF 추출 실패를 다시 시도하지 않는다.**
+
+> PDF 추출 자체는 이후 해결됐다 — `uv run --no-project --with pypdf`로 임시 의존성을 써서
+> CM5 데이터시트 Appendix B를 그대로 뽑았다(§10.5). 이 방법이 있다는 것만 남겨둔다.
 
 ---
 
@@ -741,7 +748,7 @@ composite/2-lane MIPI 제거, 5V/5A 권장 → 캐리어 검증 필요 [2차]).
   사이라는 것만 안다. dotprod 부재가 ONNX Runtime MLAS의 int8 GEMM에 얼마나 걸리는지 미측정.
 - Arm 공식 문서(109697) 본문은 리다이렉트로 직접 회수 실패 — 다만 A72 = Armv8.0
   no-dotprod/no-i8mm 결론은 GCC·LLVM 소스로 독립 이중 검증됐다.
-- CM5 캐리어 호환성은 2차 출처만 확인. 리스핀 판단 전 데이터시트 원문 확인 필요.
+- ~~CM5 캐리어 호환성은 2차 출처만 확인~~ → **§10.5에서 데이터시트 원문으로 종결**(2026-08-19).
 
 ---
 
@@ -1140,3 +1147,184 @@ introspection]. 처음엔 그래서 "지금도 espeak 없이 갈 수 있다"고 
 **우리 선택지는 셋이고 전부 열려 있다:** (a) `<2`에 머문다(현재), (b) 2.0.0 형식이
 확정되면 음절 lexicon을 생성한다, (c) Supertonic으로 간다 — character-level이라 이 문제
 자체가 없다. §13.3의 "v3의 진짜 장점은 전방 호환성"이 이 표에서 나온 말이다.
+
+---
+
+## 14. 축 4 완료 — 학술 turn-taking 2025–2026 (2026-08-19)
+
+§6-4가 논문 이름만 적어두고 중단된 축이다. **§2의 "Smart Turn v3에 사실상 대안이 없다"를
+검증하는 축이므로, 안 하고 결론을 유지하는 건 근거 없이 유지하는 것이었다.** 했다.
+
+판정 기준은 §2와 같다: **공개 가중치 / 한국어 / CPU 실행 가능 / 라이선스**.
+
+| 후보 | 공개 가중치 | 한국어 | CPU 실행 | 라이선스 | 판정 |
+|---|---|---|---|---|---|
+| **Easy Turn** (2509.23938) | ✅ [GitHub](https://github.com/ASLP-lab/Easy-Turn) + [HF](https://huggingface.co/ASLP-lab/Easy-Turn), 134★, 2026-01-25 푸시 | ❌ **언급 자체가 없음** | ❌ **850MB, 263ms / 2559MB @ RTX 4090** | ✅ Apache-2.0 | **탈락 — 3중 실격** |
+| Phoenix-VAD (2509.20410) | ❌ 없음("requires internal PR approval") | ❌ 영어·중국어 | ❌ Qwen2.5-0.5B, **50ms @ A6000** | — | 탈락 |
+| Next-Turn (2606.18094) | ❌ 미기재 | 미기재 | 미기재 | — | **모델은 못 씀. 아이디어는 값짐** |
+| Thai EOT (2510.04016) | ❌ "public-ready implementation plan"뿐 | ❌ 태국어 | text-only → 스트리밍 ASR 선행 | — | **레시피가 값짐** |
+| MuVAP (2606.16731) | ❌ 미기재 | 미기재 | ❌ **카메라 필요**(face tracks, single camera) | — | 탈락 (구조적) |
+| multilingual VAP (2403.06487) | ❌ 미기재 | ❌ **영/중/일. 한국어 명시적 부재** | 미기재 | — | 탈락 |
+| FastTurn (2604.01897) — §6에 없던 신규 | ❌ 테스트셋만 공개 | 미기재 | 미기재 | — | 관찰 항목 |
+
+**§2 결론 유지.** 다만 이제 검증된 유지다.
+
+### 14.1 Easy Turn — 유일하게 진짜 후보였고, 숫자가 닫았다
+
+§2의 부정 결과(오픈 EOT 제품이 없다)를 뒤집을 수 있는 유일한 항목이었다. 실제로 공개돼
+있고 Apache-2.0이고 활발하다. 실격은 라이선스가 아니라 **규모와 언어**다 [1차확인, README]:
+
+| 모델 | Params(MB) | Latency(ms) | Memory(MB) | ACC_cp | ACC_incp | ACC_bc | ACC_wait |
+|---|---|---|---|---|---|---|---|
+| Paraformer + TEN Turn Detection | 7220 | 204 | 15419 | 86.67 | 89.3 | – | 91 |
+| Smart Turn **V2** | 95 | 27 | 370 | 78.67 | **62** | – | – |
+| **Easy Turn** | **850** | **263** | **2559** | 96.33 | 97.67 | 91 | 98 |
+
+**모든 수치가 RTX 4090 기준이다** — 논문 문장: *"All experiments are conducted on a single
+NVIDIA RTX 4090 GPU"*. CPU 수치가 아예 없다.
+
+우리 기준으로 환산하면:
+- 우리는 **smart-turn-v3.2 int8 8.7MB**를 쓴다. Easy Turn은 **약 98배**다.
+- 메모리 2559MB. CM5에서 LLM 가중치만 1.43GB인데 그 위에 2.5GB를 더 얹을 수 없다.
+- 한국어는 README·모델카드 어디에도 없고 학습 데이터 예시가 `"lang": "<CN>"`이다.
+
+→ **채택 불가.** 세 이유가 독립적이라 하나가 풀려도 안 된다.
+
+### 14.2 그런데 이 표에서 우리 스택에 대한 경고가 나온다
+
+**Smart Turn V2의 `ACC_incp` = 62%.** "incomplete"(생각 중간의 멈춤) 판정이 **우리 적응형
+endpoint grace가 정확히 의존하는 신호다**(`vad.py:277-293`, `grace_frames_for_prob`).
+제3자 측정에서 그 판정이 62%라는 것은 가볍게 볼 수 없다.
+
+단서를 정확히 달아둔다: (a) **그들의 테스트셋**이고 자기 모델에 유리하게 구성됐을 수 있다,
+(b) **V2이고 우리는 v3.2**다 — v3에서 23개어로 확장하며 무엇이 바뀌었는지 이 표는 말하지 않는다.
+그래도 `configs/turn_detector.yaml`의 `complete_threshold: 0.5`가 아직 스톡값이고
+`detector.py:50`이 "not tuned here"라고 인정하는 상황과 겹쳐 읽으면,
+**§2가 계획해둔 임계값 스윕의 우선순위가 올라간다.**
+
+### 14.3 가장 값진 수확 — 어노테이션 없이 EOT 라벨을 만드는 방법 두 가지
+
+우리 미해결 항목 중 `labels.json` 라벨링과 "한 글자 네의 의미"는 둘 다 **라벨 데이터가
+없어서** 막혀 있다. 두 논문이 그걸 우회하는 방법을 준다.
+
+**(a) Next-Turn — 어노테이션이 아예 필요 없다** [1차확인, 초록]:
+
+> "We propose Next-Turn that uses the time-to-next-speech-onset as the training objective,
+> where targets are derived directly from speech timestamps and **require no additional
+> annotation**."
+
+결과: *"a 25.9% absolute improvement in endpoint accuracy within 320 ms over the strongest
+baseline"*, 그리고 *"gains that increase monotonically with increasing pauses"*.
+
+우리에게 직접 맞는다 — `data/sessions/`에 실사용 턴 오디오가 이미 쌓여 있고 타임스탬프가
+있다. **사람이 라벨을 붙이지 않아도 학습 타깃을 만들 수 있다는 뜻이다.**
+
+**(b) Thai EOT — 비영어 언어를 자막으로 부트스트랩한다** [1차확인, 초록]:
+
+> "Using transcribed subtitles from the **YODAS corpus** and Thai-specific linguistic cues
+> (e.g., sentence-final particles), we formulate EOT as a binary decision over token
+> boundaries. … demonstrates that small, fine-tuned models can deliver near-instant EOT
+> decisions suitable for on-device agents."
+
+이건 **우리 문제와 구조가 같다** — 비영어, 종결어미 같은 언어별 단서, 온디바이스 목표.
+한국어에도 그대로 옮길 수 있는 레시피다(YODAS는 다국어 자막 코퍼스).
+
+단 한계도 같다: **text-only**라 스트리밍 ASR이 선행돼야 하고, §2가 LiveKit turn-detector를
+"연산 두 배"로 평가한 이유가 그대로 적용된다. 우리 chunked-SenseVoice는 최초 커밋이
+1.29초라(§7) 그 앞단으로 쓰기엔 느리다.
+
+→ **지금 만들지 않는다.** 하지만 "라벨이 없어서 못 한다"가 더는 정확한 서술이 아니다.
+Smart Turn 임계값 스윕이 실제 발화를 필요로 하는데, 그 발화에 **사람 라벨 없이** 타깃을
+붙이는 경로가 이제 문서화됐다.
+
+### 14.4 우리 4-state 어휘가 독립적으로 검증됐다
+
+트랙 C-1에서 `TurnVerdict`를 만들 때 **TEN의 3-state가 아니라 4개**로 간 이유를
+`verdict.py`에 적어뒀다(왜 두 단계를 합칠 수 없는지, 왜 3개가 아니라 4개인지).
+
+Easy Turn이 예측하는 것 [1차확인, 초록]: *"four dialogue turn states: **complete,
+incomplete, backchannel, and wait**"*.
+
+우리 것: `FINISHED / UNFINISHED / WAIT / EMPTY`. backchannel이 우리 `WAIT`이고 그들의
+`wait`가 우리 `UNFINISHED`에 가깝다는 매핑 차이는 있지만, **네 상태로 쪼갠 판단 자체가
+독립적으로 같은 결론에 도달했다.** 설계 판단에 대한 외부 근거로 기록한다.
+
+### 14.5 VAP 계열은 닫힌다
+
+§6이 "한국어 VAP 체크포인트는 발견되지 않았다"고 예비 관찰로 적었던 것을 확정한다
+[1차확인, 2403.06487 초록]:
+
+- 다국어 VAP는 **영어·중국어·일본어**이고 **한국어가 없다**
+- 그리고 전이가 안 된다: *"a monolingual VAP model trained on one language does not make
+  good predictions when applied to other languages"*
+
+→ 일본어 VAP를 한국어에 쓰는 우회로는 **논문 자신이 반박한다.** MuVAP은 카메라가 필요해
+오디오 전용 기기에 구조적으로 안 맞는다. **VAP 계열 전체를 닫는다.**
+
+---
+
+## 15. CM5 — 데이터시트 원문 확인 (2026-08-19)
+
+§10이 "CM4를 사지 말고 CM5로 올려라"로 닫았는데, 캐리어 호환성 근거가 2차 출처뿐이었다.
+데이터시트 원문(`RP-008180-DS-7-cm5-datasheet.pdf`, Appendix B)을 읽었다. [전부 1차확인]
+
+> 추출 방법을 남겨둔다 — WebFetch의 PDF 텍스트 추출이 이 문서에서 실패했다(구조 메타데이터만
+> 나옴). 저장된 PDF에 `uv run --no-project --with pypdf`로 임시 의존성을 붙여 뽑았다.
+> `--no-project`가 필요하다: 프로젝트 디렉터리에서 그냥 `uv run`을 쓰면 uv가 `.venv`를
+> 건드리려다 실패한다.
+
+### 15.1 §10의 전제가 확인됐다
+
+> "High-performance SoC. Broadcom **BCM2712 quad-core Cortex-A76** (ARMv8) 64-bit processor
+> running at **2.4 GHz**."
+> "Memory options. Available with 2 GB, 4 GB, 8 GB, or 16 GB **LPDDR4x-4267** SDRAM with ECC"
+
+§10.1의 논지가 그대로 성립한다 — CM4의 A72는 Armv8.0-A로 **dotprod/i8mm이 없어** llama.cpp의
+ARM 양자화 빠른 경로를 전부 놓치는데, **A76은 Armv8.2-A라 dotprod을 갖는다.** 클럭도
+1.5GHz → 2.4GHz(1.6배)다. 보드를 CM5로 올리라는 권고의 근거가 1차 출처로 확인됐다.
+
+### 15.2 캐리어 호환성 — 폼팩터는 같고 23핀이 다르다
+
+Appendix B Table 14가 CM4↔CM5 핀 차이를 전수 나열한다. 우리에게 의미 있는 것만:
+
+| 핀 | CM4 | CM5 | 우리 영향 |
+|---|---|---|---|
+| 16 | SYNC_IN | **Fan_tacho** | 팬 제어로 용도 변경 |
+| 19 | Ethernet nLED1 | **Fan_PWM** | 이더넷 LED를 쓰면 재배선 |
+| 76 | Reserved | VBAT | RTC 배터리. *"constant load of a few uA even if CM5 is powered"* |
+| 92 | RUN_PG | **PWR_Button** | Pi 5식 전원 버튼 동작 |
+| 94, 96 | AnalogIP1/0 | **CC1/CC2** | **ADC 두 채널이 사라진다** → USB-C PD 협상용 |
+| 99 | Global_EN | PMIC_ENABLE | *"No external change"* |
+| 100 | nEXTRST | CAM_GPIO1 | 부팅 중 low로 구동돼 nRESET을 흉내 |
+| 104, 106 | Reserved | PCIE_DET_nWAKE / PCIE_PWR_EN | 신규 |
+| 111 | VDAC_COMP | **VBUS_EN** | USB 3.0 포트 전원 제어 |
+| 128–142 | **CAM0** | **USB 3.0 포트** | 카메라 포트가 사라진다 |
+| 157–171 | **DSI0** | **USB 3.0 포트** | 디스플레이 포트가 사라진다 |
+
+그 외 [1차확인, B.1.2]: 커넥터 브랜드 변경, PCB가 0.04mm 두꺼움, PCIe CLK가 더는 용량 결합
+아님, **HDMI/SDA/SCL/HPD/CEC의 추가 ESD 보호가 CM5에서 제거됨**, CAM1·DSI1이 겸용이 됨.
+
+### 15.3 우리 판정 — 이건 마이그레이션 비용이 아니라 설계 입력이다
+
+**CM4를 안 사기로 이미 결정했으므로**(§10) 우리에게 기존 캐리어가 없다. 즉 23핀 차이는
+"고쳐야 할 것"이 아니라 "처음부터 CM5 핀아웃으로 그리면 되는 것"이다.
+
+오디오 전용 기기라는 점이 유리하다 — 가장 큰 변경인 **CAM0(128–142)과 DSI0(157–171)이
+USB 3.0으로 바뀐 것**은 카메라도 DSI 디스플레이도 안 쓰는 우리에게 무해하고, 오히려
+**USB 3.0 포트 두 개를 얻는다**(USB 마이크에 쓸 수 있다).
+
+주의할 것 둘:
+
+1. **ADC 두 채널이 사라진다**(핀 94/96 → USB-C PD CC). 아날로그 입력으로 뭔가 재려는
+   설계(배터리 전압, 아날로그 마이크 레벨)는 다른 방법이 필요하다.
+2. **전력 예산** [1차확인, B.3]: *"Power supply designs should accommodate **5 V at up to
+   2.5 A**."* 그리고 완화책까지 적혀 있다 — *"If this creates an issue with an existing board
+   design, **lowering the CPU clock rate** can reduce the peak power consumption."*
+   우리 워크로드가 4코어를 다 쓰는 LLM 디코드라 피크가 실제로 걸릴 쪽이다.
+   §10의 스레드 예산 논의(`runtime.yaml`)가 성능만의 문제가 아니라 **전력 문제이기도 하다.**
+
+트랙 길이 변경(B.2)은 무해하다 — *"remain well within tolerances, so no functional impact
+is expected."*
+
+→ **§10의 권고를 유지하고, 근거를 2차 → 1차로 승급한다.** 남은 실기 항목은 보드가 생긴
+뒤의 측정뿐이다.
