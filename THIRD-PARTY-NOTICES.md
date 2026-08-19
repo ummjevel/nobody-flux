@@ -9,7 +9,7 @@
 ## 이 파일이 존재하는 이유
 
 이 프로젝트는 라이선스를 각 설정 파일 주석에 흩어서 기록해왔고, 그 방식으로
-**같은 종류의 함정을 여섯 번** 만났다. 전부 "코드 라이선스 ≠ 가중치 라이선스"의 변형이다:
+**같은 종류의 함정을 일곱 번** 만났다. 전부 "코드 라이선스 ≠ 가중치 라이선스"의 변형이다:
 
 1. EXAONE / Kanana — 벤치마크는 좋은데 NC (`configs/models.yaml`)
 2. 양자화 레포의 라이선스를 원본으로 착각 (`models.yaml:89-91`)
@@ -17,6 +17,7 @@
 4. 🚨 **기본 ASR**(SenseVoice)의 가중치가 Apache도 MIT도 아님 (§11.1)
 5. Piper 한국어는 존재하지만 non-commercial (§11.4)
 6. espeak-ng이 sherpa-onnx 바이너리에 **정적 링크**돼 있어 GPL-3.0이 런타임 전체에 걸림 (§13)
+7. 🚨 **기본 VAD**(TEN-VAD)가 Apache-2.0이 아니라 "Apache-2.0 + 추가 조건"(Agora 경쟁 금지) (§2.3)
 
 절 번호는 `docs/output/research-delta-20260818.md`를 가리킨다.
 
@@ -39,9 +40,12 @@
 |---|---|---|---|
 | **sherpa-onnx** 1.13.4 | Apache-2.0 | **[디스크]** `sherpa_onnx-1.13.4.dist-info/licenses/LICENSE` | ⚠️ 아래 espeak-ng 항목 참조. 이 휠은 **Apache-2.0 고지만 싣는다** |
 | **espeak-ng** | **GPL-3.0** | **[1차]** [COPYING](https://github.com/espeak-ng/espeak-ng/blob/master/COPYING) | 🚨 아래 §1.1 |
-| onnxruntime | MIT | **[미확인]** | 선언 확인 필요 |
-| llama-cpp-python | MIT | **[미확인]** | 선언 확인 필요 |
-| numpy / sounddevice / soundfile / transformers / sentencepiece / loguru / pyyaml | — | **[미확인]** | 선언 확인 필요 |
+| onnxruntime 1.28.0 | MIT | **[디스크]** dist-info | |
+| llama-cpp-python 0.3.34 | MIT | **[디스크]** dist-info | |
+| numpy 2.5.2 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | **[디스크]** dist-info | 전부 permissive |
+| sounddevice 0.5.5 / loguru 0.7.3 / PyYAML 6.0.3 | MIT | **[디스크]** dist-info | |
+| soundfile 0.14.0 | BSD-3-Clause | **[디스크]** dist-info | |
+| transformers 4.57.1 / sentencepiece 0.2.2 | Apache-2.0 | **[디스크]** dist-info | |
 
 ### 1.1 🚨 espeak-ng — GPL-3.0이 두 경로로 들어온다
 
@@ -88,15 +92,15 @@ espeak-ng API 전체와 piper-phonemize의 `phonemize_eSpeak` C++ 심볼, 하드
 | 스테이지 | 모델 | 라이선스 | 등급 |
 |---|---|---|---|
 | ASR (기본) | SenseVoice-Small int8 | 🚨 **FunASR Model Open Source License v1.1** — Apache도 MIT도 아니다 | **[디스크]** + [레포기록] §11.1 |
-| VAD | TEN-VAD | **[미확인]** | — |
+| VAD | TEN-VAD | 🚨 **Apache-2.0 "with additional conditions"** — Agora 경쟁 금지 조항 | **[1차]** §2.3 |
 | 엔드포인트 | Smart Turn v3.2 | BSD-2-Clause (pipecat-ai) | [레포기록] `setup_common.sh:266` |
-| LLM (기본) | Mi:dm 2.0 Mini Instruct Q4_K_M | **[미확인]** | — |
-| LLM (대체) | Qwen3-0.6B Q4_K_M | Qwen3-0.6B 원본은 Apache-2.0. **재양자화본은 [미확인]** | [레포기록] |
+| LLM (기본) | Mi:dm 2.0 Mini Instruct Q4_K_M | **MIT** | **[1차]** 원본 `K-intelligence/Midm-2.0-Mini-Instruct` (우리가 받는 건 `mykor/...-gguf` 재양자화본 — 규칙 1대로 원본을 확인) |
+| LLM (대체) | Qwen3-0.6B Q4_K_M | 원본 `Qwen/Qwen3-0.6B`은 **Apache-2.0**. 우리가 받는 `bartowski/Qwen_Qwen3-0.6B-GGUF`는 **라이선스를 선언하지 않고 LICENSE 파일도 없다**(`base_model`만 명시) | **[1차]** 둘 다 확인. 파생본 선언은 **[확인 불가]** — §2.5 |
 | TTS (기본) | `sherpa-matcha-ko` | **자체 소유** — 직접 학습. 음성 디자인·코퍼스를 Qwen3-TTS로 생성, 학습 이용 가부는 프로젝트 오너 확인 완료(2026-08-18) | [레포기록] §12.1 |
-| TTS 보코더 | `vocos-22khz-univ` | **[미확인]** | — |
+| TTS 보코더 | `vocos-22khz-univ` | **Apache-2.0** | **[1차]** §2.4 — ONNX 메타데이터가 출처를 들고 있다 |
 | TTS (비교) | Supertonic 3 / 2 | **OpenRAIL-M** (use-restriction 있음) | [1차] [HF LICENSE](https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE) |
-| TTS (영어 참조) | matcha-icefall-en_US-ljspeech | **[미확인]** — 번들에 라이선스 없음 | — |
-| ASR (스트리밍, 비활성) | streaming-zipformer-ko | **[미확인]** | — |
+| TTS (영어 참조) | matcha-icefall-en_US-ljspeech | **가중치 라이선스 명시 없음.** 학습 코드(icefall)는 Apache-2.0, 데이터는 LJSpeech | **[1차]** icefall 레포 + sherpa 문서. 가중치 자체는 **[확인 불가]** |
+| ASR (스트리밍, 비활성) | streaming-zipformer-ko | **라이선스 태그 없음.** 학습 데이터 KsponSpeech(AI Hub/NIA)는 신청·승인 필요 | [레포기록] §11.8. 상업 이용·재배포 조건 **[확인 불가]** |
 
 ### 2.1 SenseVoice — 기본값인데 가장 불확실하다 🚨
 
@@ -120,6 +124,65 @@ OpenRAIL-M은 신중히 다뤘는데 이미 기본값으로 쓰고 있는 스테
 20줄이다 **[디스크]**. 이건 Supertone의 **샘플 코드** 라이선스이고 **가중치용이 아니다.**
 가중치는 업스트림 HF의 OpenRAIL-M이다 — 확인 URL은 위 표에 있고
 `configs/models.yaml:282-288`에도 기록돼 있다.
+
+### 2.3 🚨 TEN-VAD — 우리 **기본 VAD**가 순수 Apache-2.0이 아니다
+
+`ten-vad.onnx`의 ONNX 메타데이터가 라이선스 위치를 직접 들고 있다 **[디스크]**:
+`license: https://github.com/TEN-framework/ten-vad/blob/main/LICENSE`.
+그 파일의 실제 내용 **[1차]**:
+
+> "The ten-vad is licensed pursuant to the Apache License v2.0 … **with the following
+> additional conditions**."
+>
+> "You may not Deploy the ten-vad in a way that **competes with Agora's offerings**
+> and/or that allows others to compete with Agora's offerings"
+
+Apache-2.0 **파생**이지 Apache-2.0이 아니다. 파생물도 같은 조건을 유지해야 하고,
+BSD-3-Clause·BSD-2-Clause 코드를 포함한다(레포 `NOTICES`).
+
+**왜 중요한가:** Agora는 실시간 음성·영상 인프라와 대화형 AI를 판다. 우리가 만드는 것이
+"Agora의 제공물과 경쟁"하는지는 제품 형태에 달린 판단이고, **VAD는 갈아끼울 수 있는
+비교용 프리셋이 아니라 파이프라인 첫 스테이지다.** §2.1의 SenseVoice와 같은 계열 —
+기본값으로 쓰는 스테이지의 라이선스를 확인한 적이 없었다. **제품화 전 법무 확인.**
+
+**곁들여 나온 것 (라이선스와 무관하지만 중요):** 같은 메타데이터의
+`comment: "It uses 0 as the pitch feature, which may degrade the performance."`
+→ sherpa가 export할 때 **pitch feature를 버렸다.** 우리 기본 VAD는 **의도적으로 열화된
+빌드**다. VAD 임계값 튜닝(`_calibrate_vad_threshold.py`)의 상한이 여기서 정해진다.
+
+### 2.4 vocos 보코더 — 문서에 없고 파일에 있었다
+
+sherpa-onnx 문서, 릴리스 노트, export PR([#2012](https://github.com/k2-fsa/sherpa-onnx/pull/2012))
+어디에도 상류 체크포인트 출처가 없다 **[1차, 전부 확인]**. 그런데 ONNX 파일 자체의
+메타데이터에 있었다 **[디스크]**:
+
+```
+model_author:    BSC-LT
+model_filename:  mel_spec_22khz_univ.onnx
+url1:            https://huggingface.co/BSC-LT/vocos-mel-22khz
+url2:            https://github.com/gemelo-ai/vocos
+```
+
+`BSC-LT/vocos-mel-22khz`의 HF 선언은 **Apache-2.0** **[1차]**.
+
+> **방법 메모:** sherpa-onnx 재배포 모델의 출처를 찾을 때 **ONNX 메타데이터를 먼저 읽어라.**
+> 이번에 `vocos`(출처)와 `ten-vad`(라이선스 URL + 열화 경고), `matcha-ko`(`has_espeak`)
+> 세 건이 전부 파일 안에서 나왔다. 문서보다 파일이 정확했다.
+
+### 2.5 재양자화 레포는 라이선스를 선언하지 않을 수 있다
+
+규칙 1은 "양자화 레포에서 라이선스를 가져오지 말고 원본을 봐라"인데, 이번에 그 변형을
+만났다 — **가져올 것이 아예 없는 경우.**
+
+| 우리가 받는 것 | 파생본 선언 | 원본 | 원본 선언 |
+|---|---|---|---|
+| `mykor/Midm-2.0-Mini-Instruct-gguf` | **MIT** (+ `LICENSE.txt` 있음) [1차] | `K-intelligence/Midm-2.0-Mini-Instruct` | **MIT** [1차] |
+| `bartowski/Qwen_Qwen3-0.6B-GGUF` | **없음** (LICENSE 파일도 없음, `base_model`만) | `Qwen/Qwen3-0.6B` | **Apache-2.0** [1차] |
+
+Mi:dm 쪽은 파생본도 원본과 같은 MIT를 선언하고 LICENSE 파일까지 싣는다 — 이게 정상이다.
+Qwen3 쪽이 비어 있다. 원본 라이선스가 파생·재배포를 허용하므로 실질적으로는 그게 따라온다고
+보는 게 자연스럽지만, **파생 레포가 아무 선언도 하지 않았다는 사실 자체는 기록해둔다.** 고지문에 무엇을 적을지는
+원본을 기준으로 하되, 실제로 배포하는 바이트는 파생본이라는 점이 다르다.
 
 ---
 
@@ -163,11 +226,13 @@ sherpa-onnx가 Matcha의 텍스트 프론트엔드를 **설정이 아니라 모�
 
 ## 4. 갱신 규칙
 
-이 프로젝트가 여섯 번의 함정에서 얻은 규칙:
+이 프로젝트가 일곱 번의 함정에서 얻은 규칙:
 
 1. **양자화 레포나 기억에서 라이선스를 가져오지 않는다.** 원본 모델 카드를 읽는다.
 2. **번들 안의 `LICENSE`가 가중치 라이선스라고 가정하지 않는다.** 샘플 코드용일 수 있다.
 3. **코드 라이선스와 가중치 라이선스를 따로 적는다.** 같은 프로젝트에서도 다르다.
 4. **HF 태그도 1차 출처가 아니다** (§9.5) — 파생 모델이 상류 태그를 물려받는다.
-5. 프리셋을 추가할 때 이 파일에 행을 추가한다. **[미확인]로 적는 것은 허용되고,
+5. **ONNX 메타데이터를 먼저 읽는다** (§2.4) — 재배포 모델의 출처·라이선스·열화 경고가
+   문서에는 없고 파일에는 있는 경우가 실제로 세 번 있었다.
+6. 프리셋을 추가할 때 이 파일에 행을 추가한다. **[미확인]로 적는 것은 허용되고,
    추측해서 적는 것은 안 된다.**
