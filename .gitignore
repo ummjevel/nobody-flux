@@ -65,6 +65,11 @@ data/*.db-journal
 # covered by data/*.wav above -- that pattern only matches direct children).
 data/tmp/
 
+# Prompt-prefix KV snapshots written by NobodyLLMGguf.warm_up(). Derived cache,
+# ~75MB each, keyed to one model file's size+mtime on one machine -- so it is
+# both too big to commit and meaningless on any other host.
+data/kv-prefix/
+
 # OS / editor
 .DS_Store
 Thumbs.db

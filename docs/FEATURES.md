@@ -205,6 +205,11 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | `data_dir` 부재 = **프로세스 사망** | **실측** | 잘못된/빈 `data_dir` → rc=1, **Python 예외 없음**(C 레벨 abort, try/except로 못 잡음). TTS만 degrade되는 게 아니라 에이전트 전체가 종료. 먼저 하드코딩 `/usr/share/espeak-ng-data`로 폴백하므로 **리눅스 타깃에선 시스템 espeak 사전을 쓸 위험** |
 | espeak 측정 시 프로세스 분리 필수 | **실측 — 측정법** | espeak-ng은 프로세스 전역 싱글턴(`espeak_ng_Initialize`). 한 프로세스에서 정상 경로를 먼저 초기화하면 뒤이은 잘못된 경로가 그 상태를 재사용해 **거짓 통과**한다(처음 이렇게 재서 "없어도 동일 오디오"라는 오답을 얻었다) |
 | GPL-3.0 고지·소스 제공 | **미해결 — 사람 판단** | `models/sherpa-matcha-en/`에 `LICENSE`/`COPYING`이 **재귀 탐색으로도 없음**(251바이트 README뿐). 기기 이미지 배포 시 의무 발생. §13.1 때문에 **프리셋 선택과 무관** |
+| **프롬프트 프리픽스 KV를 디스크에 저장** | **실측 — 구현 완료** | `warm_up()`이 `llama_state_seq_save_file`/`load_file`로 스냅샷. 재시작 후 warm_up **3.29s → 0.14s**(24배). 프리픽스 648토큰, 스냅샷 **75.6MB**(= 648 × 28층 × 2(K+V) × 1024 × 2B = 74.3MB, 산술 일치). 검증: `scripts/_verify_kv_prefix.py` |
+| KV 복원이 실제로 맞는지 | **실측 — 맞다** | 복원 상태에서 greedy 생성한 답이 정상 프리필 답과 **문자 단위 동일**. 이 확인이 필요한 이유: 복원이 어긋나면 예외가 아니라 **그럴듯한 오답**이 나온다 |
+| ⚠️ 프리픽스 토큰화가 `create_completion`과 달랐다 | **실측 — 버그 수정** | `Llama.tokenize` 기본값은 `add_bos=True, special=False`인데 `_create_completion`은 `add_bos=False, special=True`를 쓴다. 기본값으로 재면 `<\|im_start\|>`가 특수토큰 1개가 아니라 **리터럴 텍스트**가 되어 **744 vs 659토큰**으로 갈렸다. 조용한 실패 — 스냅샷을 복원해도 `generate()`가 거부하고 재프리필해서 **이득이 0**이 된다 |
+| 스냅샷 누적 누수 | **수정** | 키에 모델 identity + 프리픽스 토큰이 들어가므로 **페르소나를 고칠 때마다 75MB가 고아로 남는다**. `prune_stale_kv_snapshots()`가 저장 시 나머지를 삭제(현재 1개만 유용). SD카드 타깃에서 아무도 못 알아채는 종류의 누수였다 |
+| CM4/CM5에서 이 이득 | **미측정 — 추정** | SD카드 순차 읽기 20~40MB/s 가정 시 75MB 로드는 **2~4초**. 같은 프리필 추정치가 **130~230초**(§10.2)이므로 여전히 압도적 이득이지만, 개발 박스(NVMe, 0.14s)와는 자릿수가 다르다 |
 | **CM4 타깃 판정** | **결론 — 사지 말 것** | A72는 Armv8.0-A로 dotprod·i8mm·FP16 산술이 없고, llama.cpp의 ARM 양자화 빠른 경로가 **전부** dotprod를 요구한다(GCC/LLVM 소스 확인). `ggml_vdotq_s32`가 NEON 6개로 에뮬레이션됨. 동일 실리콘(Pi 4) 실측 환산 → 45토큰 응답 **13~18초**, warm-up **130~230초**. → **CM5(A76, dotprod 있음)로 타깃 상향 권고.** `research-delta-20260818.md` §10 |
 | CM4에서 죽는 것 / 사는 것 | **실측** | **LLM만 죽는다.** Matcha-TTS는 Pi 4 실측 RTF 0.411@4T로 실시간. 단 우리 `runtime.yaml`이 TTS에 **1스레드**만 줘서 CM4 환산 RTF ≈1.13 → **스테이지 배분 재검토 필요**(설정 문제, 보드와 무관) |
 | 🚨 **기본 ASR 가중치 라이선스** | **미확인 → 확인됨, 문제 있음** | `models/sense-voice/LICENSE`가 링크 한 줄(`Ref to FunASR#license`). Apache/MIT 아님 — **FunASR Model Open Source License v1.1**(Alibaba). 비교용이 아니라 **기본값**이다. 제품화 전 법무 확인 |

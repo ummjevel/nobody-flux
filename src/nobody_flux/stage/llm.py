@@ -8,6 +8,9 @@ treat reply quality here as a baseline to improve on, not a final answer.
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
@@ -272,6 +275,71 @@ class NobodyLLM:
 
 DEFAULT_GGUF_MODEL_PATH = PROJECT_ROOT / "models" / "qwen3-0.6b-gguf" / "Qwen3-0.6B-Q4_K_M.gguf"
 
+# Prefix-KV snapshots are named by this key rather than by the preset name so
+# that a stale snapshot cannot be silently restored onto a prompt it does not
+# belong to. Free function (not a method) so it is testable without loading a
+# 484MB GGUF -- the same reason the turn-verdict logic lives in pure functions.
+KV_CACHE_FILE_PREFIX = "prefix-"
+
+
+def kv_prefix_cache_key(model_path: Path | str, prefix_tokens: list[int]) -> str:
+    """Identify a KV snapshot by everything that must match for it to be valid.
+
+    Covers the model file (name, size, mtime) and the prefix tokens themselves.
+    Any of those changing -- an edited persona, a new few-shot example, a
+    requantized GGUF -- has to miss the cache, because restoring a KV state that
+    does not correspond to the tokens the model is about to be told it already
+    holds does not raise. It generates from a state that never existed.
+
+    mtime is included on purpose: a redownloaded GGUF of identical size and name
+    is not necessarily identical content, and the cheap check is worth more here
+    than cache hits across a re-fetch.
+    """
+    try:
+        stat = Path(model_path).stat()
+        model_id = "%s:%d:%d" % (Path(model_path).name, stat.st_size, int(stat.st_mtime))
+    except OSError:
+        # No file to stat (a test double, a deleted model). Fall back to the
+        # path string so the key is still stable rather than raising inside an
+        # optimization path.
+        model_id = str(model_path)
+    return hashlib.sha256(
+        model_id.encode("utf-8")
+        + b"|"
+        + ",".join(str(t) for t in prefix_tokens).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def prune_stale_kv_snapshots(cache_dir: Path | str, keep: Path | str | None = None) -> list[Path]:
+    """Delete prefix-KV snapshots other than `keep`, returning what was removed.
+
+    Deliberately narrow: it only ever touches files matching the snapshot naming
+    pattern inside the directory it is handed, and never recurses. This runs
+    against a directory under data/, and a delete helper that could be pointed at
+    something else is not worth the convenience.
+
+    Errors are swallowed per file. A snapshot that cannot be deleted (locked by
+    another process reading it) is a wasted 75MB, not a reason to fail a warm-up.
+    """
+    cache_dir = Path(cache_dir)
+    keep_resolved = Path(keep).resolve() if keep is not None else None
+    removed: list[Path] = []
+    try:
+        candidates = sorted(cache_dir.glob("%s*.bin" % KV_CACHE_FILE_PREFIX))
+    except OSError:
+        return removed
+    for f in candidates:
+        if not f.is_file():
+            continue
+        try:
+            if keep_resolved is not None and f.resolve() == keep_resolved:
+                continue
+            f.unlink()
+            removed.append(f)
+        except OSError:
+            continue
+    return removed
+
 
 @dataclass
 class NobodyLLMGguf:
@@ -340,6 +408,10 @@ class NobodyLLMGguf:
     history: list[dict] = field(default_factory=list)
     # Same purpose as NobodyLLM's field of the same name -- see its docstring.
     system_prompt_suffix: str = ""
+    # Where warm_up() parks its prompt-prefix KV snapshot. Under data/ because
+    # it is a derived cache keyed to one model file on one machine -- not
+    # something to commit, and not something to copy between hosts.
+    kv_cache_dir: Path = PROJECT_ROOT / "data" / "kv-prefix"
 
     def __post_init__(self):
         from llama_cpp import Llama
@@ -422,6 +494,99 @@ class NobodyLLMGguf:
         if len(self.history) > max_messages:
             self.history = self.history[-max_messages:]
 
+    def _static_prefix_tokens(self) -> list[int]:
+        """The tokens every turn's prompt begins with, discovered rather than assumed.
+
+        Tokenize two prompts that differ only in the user text and take their
+        longest common prefix. That is exactly the span llama.cpp's own
+        prefix-reuse would match, and deriving it avoids assuming anything about
+        how a model's chat template lays out its system block, the few-shot
+        turns, or the generation prompt -- which matters because those templates
+        differ wildly (Mi:dm injects about a thousand tokens of its own system
+        prompt ahead of ours; measured 1144 total for this project's prefix).
+
+        add_bos/special must match how create_completion tokenizes, not
+        Llama.tokenize's own defaults, and they do not agree: that path uses
+        `add_bos=False, special=True` (llama_cpp.Llama._create_completion, for a
+        non-FIM model with no suffix). Getting this wrong is silent -- the
+        defaults render ChatML markers like <|im_start|> as literal text instead
+        of single special tokens, producing a longer token sequence that no real
+        prompt will ever match. The snapshot then restores a prefix that
+        generate() rejects, so it re-prefills and the cache buys nothing.
+        Measured before the fix: 744 tokens here against 659 actually evaluated.
+        """
+        tok = lambda text: self._llm.tokenize(
+            self._build_prompt(text).encode("utf-8"), add_bos=False, special=True
+        )
+        a, b = tok("가"), tok("나")
+        n = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            n += 1
+        return list(a[:n])
+
+    def _kv_cache_path(self, prefix: list[int]) -> Path:
+        """Where this model's snapshot of this prefix lives. See kv_prefix_cache_key."""
+        key = kv_prefix_cache_key(self.model_path, prefix)
+        return self.kv_cache_dir / ("%s%s.bin" % (KV_CACHE_FILE_PREFIX, key))
+
+    def _load_prefix_kv(self, path: Path, prefix: list[int]) -> bool:
+        """Restore a saved prefix KV and make llama-cpp-python's bookkeeping agree.
+
+        Restoring the KV alone is not enough, and getting this half-right is the
+        whole risk in this optimization. `Llama.generate` decides how much to
+        reuse by comparing incoming tokens against `self._input_ids` up to
+        `self.n_tokens`. If the KV is warm but that bookkeeping still reads
+        zero, the prefix is silently re-prefilled and the cache bought nothing;
+        if it reads higher than the KV actually holds, generation proceeds from
+        a state that was never evaluated.
+
+        So both are set here, and the restored token count *and* the restored
+        tokens are verified against the prefix we expect first. A mismatch is
+        treated as a miss rather than trusted, because the failure mode is wrong
+        output rather than an error.
+        """
+        import llama_cpp
+
+        inner = self._llm
+        capacity = len(prefix)
+        tokens_out = (llama_cpp.llama_token * capacity)()
+        n_out = ctypes.c_size_t(0)
+        restored = llama_cpp.llama_state_seq_load_file(
+            inner._ctx.ctx, str(path).encode("utf-8"), 0, tokens_out, capacity, ctypes.byref(n_out)
+        )
+        if not restored or n_out.value != capacity:
+            return False
+        if list(tokens_out[: n_out.value]) != prefix:
+            # The file holds a different prefix than its key implied. Refuse it.
+            return False
+        inner.n_tokens = capacity
+        inner.input_ids[:capacity] = prefix
+        return True
+
+    def _save_prefix_kv(self, path: Path, prefix: list[int]) -> None:
+        """Write the snapshot, then delete every snapshot it supersedes.
+
+        Pruning is not housekeeping, it is required. These files are large --
+        proportional to prefix length times layers times KV width, measured at
+        75MB for a 648-token prefix on Qwen3-0.6B -- and the key changes on every
+        persona or few-shot edit. Without this, each edit would strand another
+        75MB in data/kv-prefix/ forever, which on an SD-card target is the kind
+        of slow leak nobody notices until the card is full.
+
+        Only one snapshot is ever useful at a time (one model, one prefix), so
+        keeping exactly the current one is the whole policy.
+        """
+        import llama_cpp
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arr = (llama_cpp.llama_token * len(prefix))(*prefix)
+        llama_cpp.llama_state_seq_save_file(
+            self._llm._ctx.ctx, str(path).encode("utf-8"), 0, arr, len(prefix)
+        )
+        prune_stale_kv_snapshots(self.kv_cache_dir, keep=path)
+
     def warm_up(self) -> None:
         """Prefill the static part of the prompt so the first real turn is not
         the one that pays for it.
@@ -438,16 +603,51 @@ class NobodyLLMGguf:
         being synthesized and played, which is dead time of roughly the right
         size.
 
-        Generates a single token rather than zero: llama.cpp populates the
-        cache as part of evaluating a request, so asking for no output would
-        not prime anything. Failures are swallowed -- this is an optimization,
-        and a session that starts slowly is better than one that does not
-        start.
+        Two layers, because llama.cpp's in-process cache does not survive a
+        restart and the greeting is only a few seconds of cover:
+
+        1. Restore the prefix KV from disk, if a snapshot for exactly this model
+           and exactly these tokens exists. `llama_state_seq_load_file` is bound
+           in llama-cpp-python but unused by its high-level API, so this is the
+           one place here that reaches into internals -- see _load_prefix_kv for
+           what has to stay consistent.
+        2. Otherwise prefill normally and save a snapshot for next time.
+
+        Layer 1 matters because the cost is not constant. On the CM4-class
+        target the same prefill is projected at 130-230s
+        (docs/output/research-delta-20260818.md §10.2) -- far past anything a
+        greeting can absorb, and the reason this is worth doing regardless of
+        which board is chosen. On the dev box it saves a few seconds.
+
+        The prefill generates a single token rather than zero: llama.cpp
+        populates the cache as part of evaluating a request, so asking for no
+        output would not prime anything.
+
+        Failures are swallowed -- this is an optimization, and a session that
+        starts slowly is better than one that does not start. That covers the
+        disk layer too: a corrupt or stale snapshot is deleted and the normal
+        prefill runs.
         """
         try:
+            prefix = self._static_prefix_tokens()
+            path = self._kv_cache_path(prefix) if prefix else None
+
+            if path is not None and path.exists():
+                try:
+                    if self._load_prefix_kv(path, prefix):
+                        return
+                except Exception:
+                    pass
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
             self._llm.create_completion(
                 self._build_prompt("안녕"), max_tokens=1, temperature=0.0, stop=self.stop
             )
+
+            if path is not None and prefix:
+                with contextlib.suppress(Exception):
+                    self._save_prefix_kv(path, prefix)
         except Exception:
             pass
 
