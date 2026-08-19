@@ -26,7 +26,11 @@
 # --- Core pipeline runtime -------------------------------------------------
 # sherpa-onnx carries the ASR (SenseVoice), TTS (Matcha) and VAD (TEN-VAD)
 # stages; onnxruntime is both its backend and Smart Turn v3's.
-sherpa-onnx>=1.13.4
+# The <2 bound is deliberate: 2.0.0 removes espeak-ng/piper-phonemize over a
+# GPL-3.0 conflict (k2-fsa/sherpa-onnx#3731), and the default Korean TTS preset
+# is trained on espeak-ng phonemes, so it breaks without them. Lift only with a
+# replacement phoneme source. docs/output/research-delta-20260818.md §13.
+sherpa-onnx>=1.13.4,<2
 onnxruntime>=1.27.0
 numpy>=2.4.6
 

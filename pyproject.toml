@@ -13,7 +13,13 @@ dependencies = [
     "onnxruntime>=1.27.0",
     "pyyaml>=6.0",
     "sentencepiece>=0.2.2",
-    "sherpa-onnx>=1.13.4",
+    # Upper bound is deliberate. sherpa-onnx 2.0.0 removes espeak-ng and
+    # piper-phonemize to settle a GPL-3.0/Apache-2.0 conflict
+    # (k2-fsa/sherpa-onnx#3731), and the default Korean TTS preset
+    # (sherpa-matcha-ko) is trained on espeak-ng phonemes -- it stops working
+    # without them. Lift this only together with a replacement phoneme source.
+    # See docs/output/research-delta-20260818.md §13.
+    "sherpa-onnx>=1.13.4,<2",
     "sounddevice>=0.5.1",
     "soundfile>=0.14.0",
     "torch>=2.6.0",

@@ -197,7 +197,14 @@ Phase 3~4에서 `src/nobody_flux/`를 역할별 패키지로 나눴다 (평평�
 | ⚠️ **TTS 합성이 프로세스마다 다르다** | **실측 — 측정법 결함** | Matcha는 flow-matching + `noise_scale`이고 sherpa가 프로세스 단위 시드 → 같은 문장이 md5·샘플수까지 다름. 시드 파라미터 없음. **94자 세트 CER 해상도 ±0.04** → 1회 측정은 측정이 아니다. `_ab_tts.py --repeat` 기본 3으로 수정 |
 | ~~화자 10명 CER 순위~~ | **무효** | sid=7(0.025)~sid=2(0.089) 순위 전체가 위 노이즈 밴드 안이었다. `speaker_id: 7`은 임의 선택 |
 | Supertonic 2 vs 3 속도 | **실측** | v2가 v3보다 **2.9배**, matcha보다 **1.7배** 빠름(v3가 스텝 5→8). 스텝 수는 sherpa로 조절 불가 → v2가 유일한 경로 |
-| matcha-ko 출처 | **확인됨** | 자체 학습 모델. 목소리 디자인·학습 데이터를 **Qwen3-TTS로 생성**. 남은 질문은 가중치가 아니라 **코퍼스** — Qwen3-TTS 출력물의 학습 이용 허용 여부 미확인 |
+| matcha-ko 출처·라이선스 | **확인 완료** | 자체 학습 모델. 목소리 디자인·학습 데이터를 **Qwen3-TTS로 생성**. 그 출력물의 학습 이용 가능 여부는 **프로젝트 오너가 확인**(2026-08-18) → 라이선스 미결 사항 없음. 가중치도 자체 소유 |
+| ⚠️ **espeak-ng이 sherpa-onnx DLL에 정적 링크** | **실측** | `sherpa-onnx-c-api.dll`에 `espeak_ng_*` 전체 API + piper-phonemize `phonemize_eSpeak` 심볼 + 하드코딩 `/usr/share/espeak-ng-data`. **ASR·VAD가 같은 DLL을 쓴다** → TTS 프리셋을 바꿔도 GPL-3.0 노출은 안 사라진다. "Supertonic은 espeak 의존 없음 = 라이선스 이득"이라 적었던 것은 **데이터 디렉터리 수준에서만 참** |
+| espeak-ng GPL-3.0 충돌 | **1차확인 — upstream 인정** | k2-fsa/sherpa-onnx#3731(2026-07-08): "GPL … incompatible with the Apache-2.0 license of sherpa-onnx" → **2.0.0에서 제거 예고**. 아직 미출시(PyPI 최신 1.13.6). 마이그레이션은 `lexicon.txt` 또는 외부 음소화 + 신규 `tokens` 필드 |
+| matcha-ko가 2.0.0에서 좌초된다 | **실측** | `tokens.txt`가 **espeak IPA 음소 목록**(159개, 앞 14개가 matcha-en과 바이트 동일, 꼬리가 IPA 구별기호). ONNX 메타데이터도 `"espeak-ng ko phonemes"`. → 2.0.0에선 한국어 lexicon이나 외부 음소화기가 있어야 동작. Supertonic은 character-level이라 무영향 = **이게 v3의 진짜 장점(라이선스가 아니라 전방 호환성)** |
+| `sherpa-onnx` 상한 없었음 | **수정** | 핀이 `>=1.13.4`(상한 없음)이라 2.0.0 출시 후 새 설치가 기본 TTS를 조용히 깨뜨릴 수 있었다 → `>=1.13.4,<2`로 상한 추가(`pyproject.toml`, `requirements/windows-cpu.txt`) |
+| `data_dir` 부재 = **프로세스 사망** | **실측** | 잘못된/빈 `data_dir` → rc=1, **Python 예외 없음**(C 레벨 abort, try/except로 못 잡음). TTS만 degrade되는 게 아니라 에이전트 전체가 종료. 먼저 하드코딩 `/usr/share/espeak-ng-data`로 폴백하므로 **리눅스 타깃에선 시스템 espeak 사전을 쓸 위험** |
+| espeak 측정 시 프로세스 분리 필수 | **실측 — 측정법** | espeak-ng은 프로세스 전역 싱글턴(`espeak_ng_Initialize`). 한 프로세스에서 정상 경로를 먼저 초기화하면 뒤이은 잘못된 경로가 그 상태를 재사용해 **거짓 통과**한다(처음 이렇게 재서 "없어도 동일 오디오"라는 오답을 얻었다) |
+| GPL-3.0 고지·소스 제공 | **미해결 — 사람 판단** | `models/sherpa-matcha-en/`에 `LICENSE`/`COPYING`이 **재귀 탐색으로도 없음**(251바이트 README뿐). 기기 이미지 배포 시 의무 발생. §13.1 때문에 **프리셋 선택과 무관** |
 | **CM4 타깃 판정** | **결론 — 사지 말 것** | A72는 Armv8.0-A로 dotprod·i8mm·FP16 산술이 없고, llama.cpp의 ARM 양자화 빠른 경로가 **전부** dotprod를 요구한다(GCC/LLVM 소스 확인). `ggml_vdotq_s32`가 NEON 6개로 에뮬레이션됨. 동일 실리콘(Pi 4) 실측 환산 → 45토큰 응답 **13~18초**, warm-up **130~230초**. → **CM5(A76, dotprod 있음)로 타깃 상향 권고.** `research-delta-20260818.md` §10 |
 | CM4에서 죽는 것 / 사는 것 | **실측** | **LLM만 죽는다.** Matcha-TTS는 Pi 4 실측 RTF 0.411@4T로 실시간. 단 우리 `runtime.yaml`이 TTS에 **1스레드**만 줘서 CM4 환산 RTF ≈1.13 → **스테이지 배분 재검토 필요**(설정 문제, 보드와 무관) |
 | 🚨 **기본 ASR 가중치 라이선스** | **미확인 → 확인됨, 문제 있음** | `models/sense-voice/LICENSE`가 링크 한 줄(`Ref to FunASR#license`). Apache/MIT 아님 — **FunASR Model Open Source License v1.1**(Alibaba). 비교용이 아니라 **기본값**이다. 제품화 전 법무 확인 |

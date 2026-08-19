@@ -44,20 +44,20 @@ fetch_file() {  # $1=dest_path  $2=url  $3=desc
     fi
 }
 
-echo "== [mac] 1/7: uv sync =="
+echo "== [mac] 1/8: uv sync =="
 uv sync
 
-echo "== [mac] 2/7: SenseVoice ASR (default) =="
+echo "== [mac] 2/8: SenseVoice ASR (default) =="
 fetch_tar "$PROJECT_ROOT/models/sense-voice" model.int8.onnx \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2" \
     "SenseVoice-Small int8 (~230MB)"
 
-echo "== [mac] 3/7: TEN-VAD =="
+echo "== [mac] 3/8: TEN-VAD =="
 fetch_file "$PROJECT_ROOT/models/ten-vad/ten-vad.onnx" \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/ten-vad.onnx" \
     "ten-vad.onnx (~330KB)"
 
-echo "== [mac] 4/7: LLM weights (GGUF) =="
+echo "== [mac] 4/8: LLM weights (GGUF) =="
 # Default preset, picked by measuring conversational behaviour rather than
 # benchmark scores -- see docs/llm-conversational-selection.md.
 fetch_file "$PROJECT_ROOT/models/midm-2.3b-gguf/Midm-2.0-Mini-Instruct-Q4_K_M.gguf" \
@@ -68,7 +68,7 @@ fetch_file "$PROJECT_ROOT/models/qwen3-0.6b-gguf/Qwen3-0.6B-Q4_K_M.gguf" \
     "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/main/Qwen_Qwen3-0.6B-Q4_K_M.gguf" \
     "Qwen3-0.6B-Q4_K_M.gguf (~460MB, fast fallback)"
 
-echo "== [mac] 5/7: Smart Turn v3 (optional endpoint) + Matcha-EN espeak-ng-data =="
+echo "== [mac] 5/8: Smart Turn v3 (optional endpoint) + Matcha-EN espeak-ng-data =="
 fetch_file "$PROJECT_ROOT/models/smart-turn-v3/smart-turn-v3.2-cpu.onnx" \
     "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx" \
     "smart-turn-v3.2-cpu.onnx (~8.7MB)"
@@ -81,13 +81,13 @@ fetch_file "$PROJECT_ROOT/models/sherpa-matcha-en/vocos-22khz-univ.onnx" \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos-22khz-univ.onnx" \
     "vocos-22khz-univ.onnx vocoder (~51MB)"
 
-echo "== [mac] 6/7: streaming Zipformer Korean ASR (optional) =="
+echo "== [mac] 6/8: streaming Zipformer Korean ASR (optional) =="
 fetch_tar "$PROJECT_ROOT/models/streaming-zipformer-ko" encoder-epoch-99-avg-1.int8.onnx \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2" \
     "streaming-zipformer-ko int8 (~60MB)"
 
 
-echo "== [mac] 7/7: Supertonic 3 TTS (comparison preset) =="
+echo "== [mac] 7/8: Supertonic 3 TTS (comparison preset) =="
 # Belongs in the mac set because it is pure CPU/ONNX -- no CUDA torch, no venv,
 # nothing this script otherwise skips. Korean-capable and character-level, so
 # unlike sherpa-matcha-ko it needs no espeak-ng-data at all.
@@ -99,6 +99,15 @@ echo "== [mac] 7/7: Supertonic 3 TTS (comparison preset) =="
 fetch_tar "$PROJECT_ROOT/models/sherpa-supertonic-3" vector_estimator.int8.onnx \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2" \
     "supertonic-3 int8 (~123MB, 31 langs, 10 speakers)"
+
+
+echo "== [mac] 8/8: Supertonic 2 TTS (the fast Supertonic) =="
+# v2 as well as v3: v3 raised the flow-matching steps 5->8 and is ~2.9x slower,
+# and sherpa-onnx exposes no way to lower the step count, so v2 is the only route
+# to the cheaper setting. Same OpenRAIL-M weights licence as v3.
+fetch_tar "$PROJECT_ROOT/models/sherpa-supertonic-2" vector_estimator.int8.onnx \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2" \
+    "supertonic-2 int8 (~81MB, 5 langs incl. Korean)"
 
 cat <<'NOTE'
 

@@ -226,8 +226,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--sid-sweep",
         action="store_true",
-        help="for multi-speaker presets, score every speaker id separately -- "
-             "speaker choice moved CER more than the choice of model did",
+        help="for multi-speaker presets, score every speaker id separately. Note "
+             "the CER spread across speakers was measured to sit inside this "
+             "harness's own noise band, so use it with --repeat and read the "
+             "ranges, or just listen to the wavs.",
     )
     p.add_argument(
         "--repeat",

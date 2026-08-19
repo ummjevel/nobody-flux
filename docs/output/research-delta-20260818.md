@@ -429,10 +429,14 @@ espeak-ng의 한국어 숫자 규칙이 있어서 *뭔가는* 하지만 정확�
   자체 모델**이다(목소리 디자인과 학습 데이터를 Qwen3-TTS로 생성). setup 스크립트가 못
   내려받는 이유는 출처 불명이 아니라 **아직 아무 데도 공개하지 않은 자체 산출물**이기 때문이다.
   → 즉 provenance는 후보들의 **장점이 아니라 단점**이다. 자체 모델이 제3자 가중치보다
-  통제권이 크고 라이선스 리스크가 낮다. 남는 진짜 질문은 하나뿐이다:
-  **Qwen3-TTS의 출력물을 학습 데이터로 쓰는 것이 그 라이선스에서 허용되는가**
-  (Apache-2.0으로 보고됐고 그렇다면 출력물 제약이 없다 — 미확인, §12 참조)
-- **espeak-ng 의존 없음** — G2P 자체가 불필요(character-level)
+  통제권이 크고 라이선스 리스크가 낮다. 코퍼스 쪽 질문(Qwen3-TTS 출력물의 학습 이용)도
+  **프로젝트 오너 확인으로 종결**됐다(2026-08-18) → 미결 라이선스 항목 없음. §12.1 참조
+- **espeak-ng 의존 없음** — G2P 자체가 불필요(character-level).
+  ⚠️ **2026-08-19 정정: 이건 라이선스 이득이 아니다.** espeak-ng은 우리가 쓰는
+  `sherpa-onnx-c-api.dll`에 **정적 링크**돼 있어 프리셋을 바꿔도 GPL-3.0 노출은
+  남는다(ASR·VAD가 같은 DLL을 쓴다). 실질 이득은 **전방 호환성**이다 — upstream이
+  2.0.0에서 espeak-ng을 제거할 예정이고 그때 espeak 음소로 학습된 matcha-ko가
+  좌초된다. **§13 참조**
 
 → **비교용 프리셋으로 유지하고 기본은 바꾸지 않는다.** 채택 판단의 남은 입력은
 (a) 사람의 청취 — 명료도는 자연스러움이 아니다, (b) **CM4 실기 RTF**.
@@ -879,9 +883,9 @@ provenance는 대안들의 **장점이 아니라 단점**이다. 자체 가중�
 통제권이 크고(교체가 아니라 **재학습**이 가능하다) 사용 제한 조항도 없다.
 Supertonic의 OpenRAIL-M에는 있다.
 
-남는 진짜 라이선스 질문은 가중치가 아니라 **코퍼스**다:
-**Qwen3-TTS의 출력물을 학습 데이터로 쓰는 것이 그 라이선스에서 허용되는가.**
-Apache-2.0으로 보고돼 있고 그렇다면 출력물에 제약이 없다 — **미확인, 확인 권고.**
+**라이선스는 정리됐다.** 가중치는 자체 소유이고, Qwen3-TTS 출력물의 학습 이용은
+**프로젝트 오너가 가능함을 확인**(2026-08-18). 즉 이 프리셋에는 미결 라이선스 항목이
+없고 하위 사용 제한도 없다 — 비교 대상이었던 제3자 후보 전부와 반대다.
 
 ### 12.2 측정법 결함 — 합성이 프로세스마다 다르다
 
@@ -937,5 +941,129 @@ CM4 환산으로 matcha는 **RTF ≈1.13(실시간 미달)**, supertonic-2는 �
 **스레드 배분을 고치는 게 먼저다** — matcha에 2스레드면 ≈0.68로 같은 곳에 도달하면서
 품질과 소유권을 지킨다. `supertonic-2-ko` 프리셋은 그 선택지를 열어두기 위해 남긴다.
 
-**남은 확인 항목**: (a) Qwen3-TTS 출력물의 학습 이용 가능 여부(§12.1)
-(b) 사람 청취 — CER은 명료도지 자연스러움이 아니다 (c) 화자 10명 중 선택은 아직 임의다.
+**남은 확인 항목** (라이선스는 §12.1에서 종결됐다): (a) 사람 청취 — CER은 명료도지
+자연스러움이 아니다 (b) Supertonic 화자 10명 중 선택은 아직 임의다.
+
+---
+
+## 13. espeak-ng / GPL-3.0 — **라이선스 문제는 모델이 아니라 런타임에 있다** (2026-08-19)
+
+§12에서 "keep matcha-ko"로 닫은 뒤, Supertonic의 장점으로 "espeak-ng 의존 없음"을
+들었다(§11 표, §7 목록). **그 근거는 우리가 실제로 배포하는 바이너리를 확인하지 않은
+채 쓴 것이었고, 확인해보니 틀렸다.** 아래가 확인 결과다.
+
+### 13.1 espeak-ng은 sherpa-onnx 바이너리에 정적 링크돼 있다 [1차확인]
+
+우리가 설치해 쓰는 휠(`sherpa_onnx 1.13.4`, `sherpa-onnx-c-api.dll`, 4.5MB) 안의 문자열:
+
+```
+espeak_ng_Initialize      espeak_ng_SetVoiceByName    espeak_ng_SetPhonemeEvents
+espeak_ng_InitializePath  espeak_ng_SetVoiceByFile    espeak_ng_CompileDictionary
+espeak_ng_GetSampleRate   espeak_ng_SetParameter      espeak_ng_SetRandSeed
+...
+?phonemize_eSpeak@piper@@YAXV?$basic_string@...        ← piper-phonemize C++ 심볼
+/usr/share/espeak-ng-data                              ← 하드코딩된 폴백 경로
+%s/espeak-ng-data
+```
+
+스텁이 아니라 **espeak-ng 라이브러리 전체**와 **piper-phonemize**가 컴파일돼 들어 있다.
+
+**그래서 프리셋을 바꿔도 노출은 사라지지 않는다.** 이 프로젝트에서 같은 DLL을
+로드하는 것은 TTS만이 아니다 — **SenseVoice ASR, TEN-VAD, streaming ASR이 전부 같은
+`sherpa-onnx-c-api.dll` 하나를 쓴다**. matcha-ko를 Supertonic으로 바꾸면 18MB
+`espeak-ng-data` 디렉터리는 안 실어도 되지만, **링크된 GPL-3.0 코드는 그대로 남는다.**
+
+> ⚠️ 따라서 §11·§12에 적은 "Supertonic 장점: espeak-ng 의존 없음"은 **데이터 디렉터리
+> 수준에서만 참이고 바이너리 수준에서는 거짓**이다. 라이선스 노출을 줄이는 근거로는
+> 쓸 수 없다. §13.3의 이유로 대체한다.
+
+### 13.2 upstream이 이 충돌을 인정하고 제거를 예고했다 [1차확인]
+
+sherpa-onnx issue [#3731](https://github.com/k2-fsa/sherpa-onnx/issues/3731)
+("Breaking Change: Remove espeak-ng and piper-phonemize dependency", 2026-07-08 개설):
+
+> "Since `espeak-ng` is licensed under GPL, it introduces license constraints that
+> are incompatible with the Apache-2.0 license of sherpa-onnx. To keep sherpa-onnx
+> fully compatible with Apache-2.0 licensing, we will remove the `espeak-ng`
+> dependency."
+
+- **메인테이너 본인들의 판정**이다. "GPL이 걸리는지"는 더 이상 우리 해석 문제가 아니다.
+- 제거는 **2.0.0**(메이저)로 예고됐고 **아직 안 나왔다** — PyPI 최신은 `1.13.6`. [1차확인]
+- 마이그레이션 경로: `lexicon.txt` 제공, 또는 외부 음소화 후 `GenerationConfig`의
+  신규 `tokens` 필드로 직접 전달.
+- 즉 지금 우리가 쓰는 1.13.4는 **Apache-2.0을 주장하지만 GPL-3.0 코드를 링크한 상태**다.
+  실제 의무 판단(배포 시 소스 제공·라이선스 고지)은 사람이 할 일이고, 여기서는
+  사실만 기록한다.
+
+### 13.3 진짜 Supertonic 장점은 라이선스가 아니라 **전방 호환성**이다 [1차확인]
+
+`matcha-ko`의 `tokens.txt`를 열어보면 **espeak IPA 음소 목록**이다:
+
+- 159개 토큰, 앞 14개가 `sherpa-matcha-en`의 것과 **바이트 단위로 동일**
+- 꼬리가 IPA 구별기호 — `ʰ ˤ ʦ ̧ ̃ ̪ ̯ ̩ ̝ ̊`
+- 모델 자신의 ONNX 메타데이터도 그렇게 말한다:
+  `comment: "Korean Matcha-TTS, espeak-ng ko phonemes, icefall tokens.txt ids"`
+  (`tts.py:347-350`에 이미 인용돼 있었다)
+
+한글도 자모도 아니다. **matcha-ko는 espeak-ng을 런타임 G2P로 실제로 쓴다.**
+
+→ **2.0.0이 espeak-ng을 제거하면 우리 자체 모델이 1.x에 좌초된다.** 계속 쓰려면
+한국어 `lexicon.txt`를 만들거나, 정확히 저 159개 음소를 뱉는 외부 음소화기를 붙여야
+한다(그리고 §11이 정리한 대로 한국어 G2P 후보는 전부 GPL·JVM·aarch64 휠 부재 중 하나에
+걸린다). Supertonic은 character-level이라 **아무 영향이 없다.**
+
+이게 §12의 "keep matcha-ko" 결론에 붙는 유일한 실질 위험이다. 결론은 유지한다 —
+2.0.0은 아직 없고, 우리는 버전을 락하고 있고, 품질·소유권 우위는 그대로다. 다만
+**"버전을 올릴 수 없는 이유"가 하나 생겼고**, 그건 기록해야 한다.
+
+### 13.4 `espeak-ng-data`가 없으면 프로세스가 죽는다 (C 레벨, 잡을 수 없음) [1차확인]
+
+배포 이미지에서 18MB 디렉터리를 빼면 어떻게 되는지 실측했다. 조건별로 **프로세스를
+분리해서** 재야 한다 — espeak-ng은 프로세스 전역 싱글턴이라 한 프로세스에서 정상 경로를
+먼저 초기화하면 뒤이은 잘못된 경로가 그 상태를 재사용해 **거짓 통과**한다(처음 이렇게
+재서 "없어도 동일한 오디오가 나온다"는 잘못된 결과를 얻었다).
+
+| 조건 | 결과 |
+|---|---|
+| `data_dir` 정상 | OK — 54192 samples, 2.46s, peak 0.4286 |
+| `data_dir` 없는 경로 | **rc=1, Python 예외 없음.** `Error processing file '/usr/share/espeak-ng-data\phontab': No such file or directory.` |
+| `data_dir` 빈 문자열 | **rc=1, Python 예외 없음.** `Error processing file '.\phontab'` |
+
+두 가지가 나온다:
+
+1. **잡을 수 없는 실패다.** `try/except`에 걸리지 않고 프로세스가 그대로 종료된다.
+   TTS만 degrade되는 게 아니라 **음성 에이전트 전체가 죽는다**. 설치 스크립트가
+   matcha-en 번들을 빼먹으면 조용한 오작동이 아니라 즉사이므로, 그 점은 오히려 낫다.
+2. **하드코딩된 `/usr/share/espeak-ng-data`로 먼저 폴백한다.** 리눅스 타깃(CM4/CM5)에서
+   시스템 espeak-ng이 깔려 있으면 **우리가 지정한 경로가 아니라 시스템 사전을 쓸 수
+   있다** — 버전이 다르면 음소가 달라지고, 음질 저하의 원인을 우리 설정에서 찾게 된다.
+   Pi 이미지 구성 시 확인 항목.
+
+### 13.5 고지 의무를 지금은 기계적으로 못 지킨다 [1차확인]
+
+- espeak-ng의 `COPYING`은 **GNU GPL v3**이다.
+- 우리 `models/sherpa-matcha-en/`에는 `LICENSE`/`COPYING`/`GPL` 파일이 **재귀 탐색으로도
+  하나도 없다**. 있는 건 학습 데이터셋(LJSpeech)만 언급하는 251바이트 `README.md`뿐이다.
+- 기기 이미지를 배포하는 순간 GPL-3.0은 라이선스 전문 동봉과 소스 제공을 요구한다.
+  **지금 상태로는 못 지킨다.** 그리고 §13.1 때문에 **이건 TTS 프리셋 선택과 무관하다** —
+  matcha-ko를 버려도 링크된 espeak-ng이 남는다.
+
+### 13.6 이미 알고 있었던 것과 새로 알게 된 것
+
+레포는 이 방향을 부분적으로 알고 있었다 — `tts-conversational-build-design.md:149`가
+"eSpeak-ng: 한국어 규칙 약함 + **GPL-3.0** + C 의존성 → 피하고 싶은 이유 정당"이라 쓰고,
+`code-review-20260814.md:262`가 "espeak-ng가 한국어 보이스로 `20`을 이상하게 음소화한다"를
+기록했다(§7의 한국어 TN 확장기를 만든 이유 중 하나). **의도는 espeak 회피였는데 실제
+배포 상태는 espeak 의존이다** — 그 간극이 이번에 확인된 부분이다.
+
+### 13.7 조치
+
+| # | 항목 | 상태 |
+|---|---|---|
+| 1 | §11·§12의 "Supertonic = espeak 의존 없음(라이선스 이득)" 주장 정정 | 이 절로 대체 |
+| 2 | `tts.py`의 Supertonic docstring에 "런타임은 여전히 링크한다" 명시 | 반영 |
+| 3 | `models.yaml`의 `data_dir` 주석에 GPL-3.0 + 2.0.0 좌초 위험 명시 | 반영 |
+| 4 | sherpa-onnx 버전 락 사유에 #3731 추가 | 반영 |
+| 5 | 배포 시 GPL-3.0 고지·소스 제공 | **미해결. 사람 판단 필요** |
+| 6 | Pi 이미지에서 시스템 `/usr/share/espeak-ng-data` 폴백 확인 | **미해결. 실기 필요** |
+| 7 | 2.0.0 대비 한국어 `lexicon.txt` 경로 조사 | **미해결. 2.0.0 릴리스 후** |

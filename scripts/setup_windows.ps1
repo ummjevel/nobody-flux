@@ -147,7 +147,7 @@ function Get-File {
     $ProgressPreference = $previous
 }
 
-$total = if ($SkipModels) { 3 } else { 10 }
+$total = if ($SkipModels) { 3 } else { 11 }
 
 # --- 1. uv ------------------------------------------------------------------
 
@@ -275,9 +275,20 @@ Get-Sherpa -Label 'sherpa-onnx-supertonic-3-tts-int8 (~123MB, 31 langs, 10 speak
     -Destination (Join-Path $ProjectRoot 'models\sherpa-supertonic-3') `
     -Marker 'vector_estimator.int8.onnx'
 
-# --- 10. verify -------------------------------------------------------------
+Write-Step 10 $total "Supertonic 2 TTS (the fast Supertonic)"
+# Both v2 and v3, because they are not interchangeable on speed: v3 raised the
+# flow-matching steps from 5 to 8 and measures ~2.9x slower, and the step count is
+# not adjustable through sherpa-onnx (no field on the model config, no key in
+# tts.json). So v2 is the only route to the cheaper setting. Same OpenRAIL-M
+# weights licence as v3.
+Get-Sherpa -Label 'sherpa-onnx-supertonic-tts-int8 v2 (~81MB, 5 langs incl. Korean)' `
+    -Url 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-tts-int8-2026-03-06.tar.bz2' `
+    -Destination (Join-Path $ProjectRoot 'models\sherpa-supertonic-2') `
+    -Marker 'vector_estimator.int8.onnx'
 
-Write-Step 10 $total "verifying"
+# --- 11. verify -------------------------------------------------------------
+
+Write-Step 11 $total "verifying"
 & $VenvPython (Join-Path $ProjectRoot 'scripts\_smoke_imports.py')
 if ($LASTEXITCODE -ne 0) { throw "import smoke test failed" }
 

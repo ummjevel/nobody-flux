@@ -325,13 +325,16 @@ class SherpaMatchaTts:
     was of unknown origin and therefore a liability. It is the opposite: it is the
     one stage whose weights this project controls outright.
 
-    The practical consequences are worth stating. It cannot be downloaded by any
-    setup script because it has not been published anywhere, not because its
-    origin is doubtful -- so a fresh machine needs it copied in by hand (see
-    scripts/setup_windows.ps1's warning). And the open licensing question is not
-    about the weights but about the corpus: whether Qwen3-TTS's terms permit its
-    output to be used as training data. Apache-2.0 would impose no such
-    restriction; that has not been verified here.
+    The practical consequence worth stating is distribution, not licensing: it
+    cannot be downloaded by any setup script because it has not been published
+    anywhere, not because its origin is doubtful -- so a fresh machine needs it
+    copied in by hand (see scripts/setup_windows.ps1's warning).
+
+    Licensing is settled. The weights are ours, and using Qwen3-TTS output as
+    training data was confirmed permissible by the project owner (2026-08-18).
+    So unlike every third-party candidate evaluated against it, this preset has no
+    outstanding licence question and no downstream use restrictions -- which is
+    the opposite of what an earlier version of this file assumed.
 
     It also means this preset is improvable rather than merely replaceable, which
     is what docs/tts-conversational-build-design.md's Path A is about.
@@ -350,6 +353,26 @@ class SherpaMatchaTts:
     multi-language phoneme dictionary package (not English-specific despite
     living under models/sherpa-matcha-en/) -- it already bundles Korean
     (espeak-ng-data/lang/ko, ko_dict).
+
+    espeak-ng is load-bearing here, not incidental, and that has two
+    consequences worth knowing before anyone edits the preset (measured
+    2026-08-19, docs/output/research-delta-20260818.md §13):
+
+    1. Removing data_dir kills the process, and not via an exception. Point it
+       at a missing directory and espeak-ng first falls back to its hardcoded
+       /usr/share/espeak-ng-data, then aborts at the C level -- rc=1, no Python
+       traceback, nothing for try/except to catch. The voice agent does not
+       degrade to a silent TTS; it exits. (On a Linux target that fallback is
+       itself a hazard: a system-installed espeak-ng would be used instead of
+       ours, with whatever phoneme tables its version ships.)
+    2. tokens.txt is the espeak IPA inventory, not Hangul or jamo -- 159 tokens
+       whose first 14 are byte-identical to the English preset's and whose tail
+       is IPA diacritics. So when sherpa-onnx 2.0.0 removes espeak-ng
+       (k2-fsa/sherpa-onnx#3731) this preset stops working until someone
+       supplies a Korean lexicon.txt or an external phonemizer emitting exactly
+       these phonemes. That is one of the reasons the sherpa-onnx version is
+       pinned; it is not a reason to switch away from this model, which we own
+       and can retrain.
 
     Each of the four model files is its own independently-overridable `Path`
     field (matching e.g. VibeAsrBitnet's vae_model/lm_model in asr.py) rather
@@ -431,6 +454,20 @@ class SherpaSupertonicTts:
     wheel. SherpaMatchaTts sidesteps it only by borrowing the English preset's
     espeak-ng-data, which this project would rather not depend on (GPL-3.0 plus
     a C dependency, and weak Korean rules).
+
+    What this does NOT buy is a smaller license surface, and an earlier version
+    of this docstring implied otherwise. espeak-ng is statically linked into the
+    sherpa-onnx wheel we install -- sherpa-onnx-c-api.dll carries the whole
+    espeak_ng_* API, piper-phonemize's phonemize_eSpeak symbol, and a hardcoded
+    /usr/share/espeak-ng-data fallback path. SenseVoice ASR and TEN-VAD load
+    that same DLL, so choosing this preset over SherpaMatchaTts drops the 18MB
+    data directory and nothing else; the linked GPL-3.0 code stays. Upstream
+    agrees the conflict is real and plans to remove espeak-ng in sherpa-onnx
+    2.0.0 (k2-fsa/sherpa-onnx#3731); it has not shipped.
+
+    The real advantage is forward compatibility: when 2.0.0 lands this class
+    keeps working untouched and SherpaMatchaTts does not. See that class's
+    docstring, and docs/output/research-delta-20260818.md §13.
 
     Supertonic needs none of it. The paper states the model "operates directly
     on raw character-level text and employs cross-attention for text-speech

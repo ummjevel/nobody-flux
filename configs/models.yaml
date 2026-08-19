@@ -253,6 +253,13 @@ tts:
       # data_dir (espeak-ng-data) is still shared, since that's a
       # multi-language phoneme dictionary package, not something that needs
       # to be per-model.
+      #
+      # data_dir is required, not optional. espeak-ng is this model's actual
+      # G2P (tokens.txt is the espeak IPA inventory, not Hangul), and pointing
+      # data_dir anywhere invalid aborts the process at the C level -- rc=1,
+      # no catchable exception. espeak-ng is GPL-3.0 and ships here with no
+      # license text; sherpa-onnx 2.0.0 will remove it (#3731), which is why
+      # the dependency is capped at <2. docs/output/research-delta-20260818.md §13
       vocoder: models/sherpa-matcha-ko/vocos-22khz-univ.onnx
       tokens: models/sherpa-matcha-ko/tokens.txt
       data_dir: models/sherpa-matcha-en/espeak-ng-data
