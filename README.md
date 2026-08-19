@@ -158,7 +158,7 @@ sqlite3 data/conversations.db "SELECT turn_index, user_text, reply_text, asr_ms,
 ### 6. 테스트
 
 ```bash
-uv run pytest        # 146개, 3초 미만  (윈도우: .venv-win\Scripts\python.exe -m pytest)
+uv run pytest        # 296개, 3초 미만  (윈도우: .venv-win\Scripts\python.exe -m pytest)
 ```
 
 **가중치도 오디오 장치도 필요 없다** — 순수 로직(턴 컨트롤러 상태기계, VAD 링버퍼, 문장 청커,
@@ -198,7 +198,7 @@ scripts/
   _calibrate_vad_threshold.py _calibrate_aec_delay.py _calibrate_turn_params.py
   _debug_vad_mic.py _debug_segment.py _debug_silence.py _debug_roomtone.py
   setup_{local,server,mac,common}.sh  setup_windows.ps1  env.sh
-tests/            # pytest 146개 — 가중치·오디오 장치 불필요, 3초 미만
+tests/            # pytest 296개 — 가중치·오디오 장치 불필요, 3초 미만
 configs/          # models, voices, vad, audio, turn_detector, streaming_asr,
                   # runtime(CPU 예산), persona_scenarios(멀티턴 평가)
 docs/             # 리서치, 기능 정의, LLM 선정, 코드리뷰, 기억/barge-in/TTS 설계

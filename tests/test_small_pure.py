@@ -10,7 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from src.nobody_flux.stage.asr_stream import LocalAgreementStabilizer, longest_common_prefix
-from src.nobody_flux.turn.backchannel import is_backchannel, is_empty_transcript
+from src.nobody_flux.turn.backchannel import (
+    BACKCHANNEL_WORDS,
+    ONE_SYLLABLE_WORDS,
+    is_backchannel,
+    is_empty_transcript,
+)
+from src.nobody_flux.turn.verdict import TurnVerdict, judge_transcript
 from src.nobody_flux.turn.vad import VoiceActivityDetector
 
 
@@ -52,6 +58,60 @@ def test_empty_transcript_catches_punctuation_only_asr_output():
     assert is_empty_transcript("") is True
     assert is_empty_transcript("   ") is True
     assert is_empty_transcript("네네") is False
+
+
+def test_one_syllable_questions_are_not_silence():
+    """"뭐?" and "왜?" are whole 반말 questions, not fragments.
+
+    The old length-only rule discarded them, and worse, talk.py's dead-microphone
+    warning counts discarded turns -- so asking "뭐?" three times accused the
+    microphone of being broken.
+    """
+    assert is_empty_transcript("뭐") is False
+    assert is_empty_transcript("뭐?") is False
+    assert is_empty_transcript("왜") is False
+    assert judge_transcript("뭐?", 0.4) is TurnVerdict.FINISHED
+
+
+def test_one_character_backchannel_words_reach_the_backchannel_gate():
+    """The shadowing bug: 네 응 음 ... are one character, so a length-only empty
+    check returned True for them and is_backchannel never saw them at all --
+    meaning the assistant could not hear the user say "네"."""
+    for word in ("네", "응", "음", "어", "예", "오", "와", "헐", "아", "넵"):
+        assert is_empty_transcript(word) is False, word
+        assert judge_transcript(word, 0.3) is TurnVerdict.WAIT, word
+
+
+def test_no_backchannel_word_is_shadowed_by_the_empty_check():
+    """Every entry in the list must be reachable. Half of them were not."""
+    unreachable = sorted(w for w in BACKCHANNEL_WORDS if is_empty_transcript(w))
+    assert unreachable == []
+
+
+def test_longer_one_character_acknowledgment_becomes_a_real_turn():
+    """Past the backchannel duration it is answered rather than dropped.
+
+    Not an accident: a drawn-out "네" is more likely an answer ("yes, do it")
+    than an acknowledgment, and the prior behaviour -- counting it as a dead
+    microphone -- was the worst of the three options.
+    """
+    assert judge_transcript("네", 0.3) is TurnVerdict.WAIT
+    assert judge_transcript("네", 1.2) is TurnVerdict.FINISHED
+
+
+def test_bare_fragments_are_still_discarded():
+    """The <= 1 rule was written against real observed failures; promoting a
+    fragment to a turn is the thing it exists to prevent."""
+    for frag in ("그", "그.", "은", "를", "ㄱ", "…"):
+        assert is_empty_transcript(frag) is True, frag
+        assert judge_transcript(frag, 0.4) is TurnVerdict.EMPTY, frag
+
+
+def test_the_two_word_lists_do_not_overlap():
+    """An overlap would make a word's verdict depend on set iteration order in
+    is_empty_transcript's fallthrough -- ONE_SYLLABLE_WORDS means FINISHED,
+    BACKCHANNEL_WORDS means WAIT, and nothing may claim both."""
+    assert ONE_SYLLABLE_WORDS & BACKCHANNEL_WORDS == set()
 
 
 # -- LocalAgreement prefix (cases ported from _smoke_turn.py) --------------------

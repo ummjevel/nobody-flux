@@ -58,18 +58,18 @@ def test_multisyllable_backchannel_is_wait():
     assert judge_transcript("어어", 0.4) is TurnVerdict.WAIT
 
 
-def test_single_syllable_backchannel_is_reported_empty_not_wait():
-    """Documents a shadowing bug found while writing these tests.
+def test_single_syllable_backchannel_is_wait_not_empty():
+    """Fixed 2026-08-19. This test previously asserted EMPTY, on purpose.
 
-    "응"/"네"/"어" are one character, so is_empty_transcript catches them before
-    is_backchannel ever runs -- half of BACKCHANNEL_WORDS is unreachable. Both
-    verdicts skip the turn, so nothing user-visible breaks today, but the
-    diagnostic counter is wrong and the docstring in backchannel.py used to claim
-    the opposite. Asserting the real behaviour so a future fix has to update this
-    test deliberately rather than discovering it by accident.
+    The shadowing bug: "응"/"네"/"어" are one character, so is_empty_transcript's
+    length rule caught them before is_backchannel ever ran, making half of
+    BACKCHANNEL_WORDS unreachable -- the assistant could not hear the user say
+    "네". Both verdicts skip the turn, so nothing user-visible broke, but the
+    dead-microphone counter was wrong. The old assertion existed so that a fix
+    would have to come here and change it deliberately, which is what happened.
     """
-    assert judge_transcript("응", 0.4) is TurnVerdict.EMPTY
-    assert judge_transcript("네", 0.4) is TurnVerdict.EMPTY
+    assert judge_transcript("응", 0.4) is TurnVerdict.WAIT
+    assert judge_transcript("네", 0.4) is TurnVerdict.WAIT
 
 
 def test_empty_transcript_is_empty():
@@ -97,16 +97,24 @@ def test_short_unrecognized_utterance_of_two_syllables_is_a_real_turn():
     assert judge_transcript("누구", 0.3) is TurnVerdict.FINISHED
 
 
-def test_one_syllable_real_question_is_wrongly_discarded():
-    """Known issue, asserted so it cannot regress silently.
+def test_one_syllable_real_question_is_a_real_turn():
+    """Fixed 2026-08-19. This test previously asserted EMPTY, on purpose.
 
-    "뭐?" and "왜?" are ordinary 반말 questions. The <= 1 length rule in
-    is_empty_transcript cannot tell them from a stray fragment like "그", so the
-    assistant ignores them -- and counts them toward the "microphone is probably
-    dead" warning. Fixing it needs a lexical distinction, not a length tweak.
+    "뭐?" and "왜?" are ordinary 반말 questions, and the old <= 1 length rule
+    could not tell them from a stray fragment like "그" -- so the assistant
+    ignored them and counted them toward the "microphone is probably dead"
+    warning. The fix is the lexical distinction the old docstring said was
+    needed: backchannel.ONE_SYLLABLE_WORDS, not a length tweak.
     """
-    assert judge_transcript("뭐", 0.4) is TurnVerdict.EMPTY
-    assert judge_transcript("왜", 0.4) is TurnVerdict.EMPTY
+    assert judge_transcript("뭐", 0.4) is TurnVerdict.FINISHED
+    assert judge_transcript("왜", 0.4) is TurnVerdict.FINISHED
+
+
+def test_one_syllable_fragment_is_still_empty():
+    """The counterpart the fix must not break: "그" is a cut-off word, not a
+    word, and promoting fragments to turns is what the length rule prevented."""
+    assert judge_transcript("그", 0.4) is TurnVerdict.EMPTY
+    assert judge_transcript("그.", 0.4) is TurnVerdict.EMPTY
 
 
 def test_transcript_never_returns_unfinished():

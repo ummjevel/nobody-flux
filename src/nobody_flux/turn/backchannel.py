@@ -25,6 +25,19 @@ BACKCHANNEL_WORDS = {
     "진짜", "정말", "그렇구나", "그래", "그니까", "맞아", "아하", "음", "아",
 }
 
+# Real one-syllable utterances, kept as a word list because that is what the
+# problem actually needs: length is not a proxy for meaning. "그" is a fragment
+# of a word that ASR cut short; "뭐" is a whole question. is_empty_transcript
+# used to discard both, on length alone.
+#
+# Deliberately small. An entry here promotes something to a full conversational
+# turn, so a wrong one means answering a fragment -- which is the exact failure
+# the "<= 1 character" rule was written against. Only unambiguous standalone
+# words belong: 나/너 ("me?"/"you?") are grammatical but far more often the
+# leading syllable of a longer sentence, so they are left out until real
+# recordings say otherwise (scripts/_calibrate_turn_params.py).
+ONE_SYLLABLE_WORDS = {"뭐", "뭘", "왜"}
+
 # docs/barge-in-design.md's initial estimate -- a real interruption that
 # happens to be lexically ambiguous (e.g. just "그래" said as the start of
 # "그래서 있잖아...") but runs longer than this isn't treated as backchannel,
@@ -58,32 +71,42 @@ def is_empty_transcript(text: str) -> bool:
     right for every microphone and room, and would still not catch a clear
     recording of a door closing.
 
-    A single character is included because that is what a bare syllable
-    fragment looks like ("그"), and one syllable carries no answerable content.
+    One character is *usually* nothing: that is what a syllable fragment looks
+    like when ASR cuts a word short ("그"). But it is not always nothing, and for
+    a while this function acted as if it were.
 
-    CAUTION -- this docstring used to claim that "anything genuinely meant as a
-    one-word reply ('네', '응') is caught by is_backchannel below". That is not
-    true, and the two examples it named are the proof: both are one character, so
-    this function returns True for them and they never reach is_backchannel at
-    all. Half of BACKCHANNEL_WORDS is shadowed the same way -- 네 넵 아 어 예 오
-    와 음 응 헐 are unreachable entries, while the two-syllable ones (그래, 맞아,
-    어어, 진짜 ...) do work.
+    What the plain ``len <= 1`` rule got wrong (fixed 2026-08-19):
 
-    Today that costs nothing user-visible, because EMPTY and WAIT both skip the
-    turn. Two things it does cost:
+      - It discarded real one-syllable turns. "뭐?" and "왜?" are ordinary 반말
+        questions, and they were treated as silence.
+      - It shadowed half of BACKCHANNEL_WORDS. 네 넵 아 어 예 오 와 음 응 헐 are
+        all one character, so they returned True here and never reached
+        is_backchannel at all -- meaning the assistant could not hear the user
+        say "네". Only the two-syllable entries (그래, 맞아, 어어, 진짜 ...) ever
+        worked.
+      - It made the diagnostic lie. talk.py counts consecutive empty turns and
+        warns that the microphone is probably dead; a user saying "뭐?" three
+        times tripped that warning.
 
-      - Real one-syllable turns are discarded. "뭐?" and "왜?" are ordinary
-        반말 questions and this treats them as silence.
-      - The diagnostic lies. talk.py counts consecutive empty turns and warns
-        that the microphone is probably dead; a user saying "뭐?" three times
-        trips that warning.
+    So the question asked here is "is this a fragment?", not "is this short?",
+    and that needs a word list rather than a length tweak. A one-character
+    transcript survives if it is a known word -- either a real utterance
+    (ONE_SYLLABLE_WORDS, which becomes a full turn) or an acknowledgment
+    (BACKCHANNEL_WORDS, which now actually reaches is_backchannel and becomes
+    WAIT). Anything else one character or shorter is still discarded.
 
-    Not changed here, deliberately: separating "그" (a fragment) from "뭐" (a
-    word) is a lexical judgement needing a word list, not a length tweak, and the
-    <= 1 rule was itself written against an observed failure. See
-    docs/FEATURES.md's human-verification list.
+    What this deliberately does NOT settle: "네" is genuinely ambiguous between
+    an acknowledgment ("mm-hmm, go on") and an answer ("yes, do it"), and text
+    plus duration cannot tell them apart -- so it stays in BACKCHANNEL_WORDS and
+    a short "네" is still not replied to. That is a policy question for real
+    labelled recordings (scripts/_calibrate_turn_params.py), not something to
+    guess at here. But it is strictly better than before, where a short "네" was
+    counted as a dead microphone.
     """
-    return len(_normalize(text)) <= 1
+    normalized = _normalize(text)
+    if len(normalized) > 1:
+        return False
+    return normalized not in ONE_SYLLABLE_WORDS and normalized not in BACKCHANNEL_WORDS
 
 
 def is_backchannel(
