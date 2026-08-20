@@ -11,7 +11,9 @@ Realtime류)에 의존하지 않는, 완전 로컬로 도는 음성 대화 파�
 [`docs/llm-conversational-selection.md`](docs/llm-conversational-selection.md), 기억(개인화) 설계는
 [`docs/memory-design.md`](docs/memory-design.md), 끼어들기 설계는
 [`docs/barge-in-design.md`](docs/barge-in-design.md), 서드파티 라이선스 고지와
-**아직 확인되지 않은 가중치 라이선스**는 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 참고.
+**아직 확인되지 않은 가중치 라이선스**는 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md),
+**지금 무엇이 결정됐고 무엇이 남았는지 / 다시 하지 말아야 할 실수**는
+[`docs/NEXT.md`](docs/NEXT.md) 참고.
 
 > ⚠️ **턴테이킹 경로는 아직 사람이 말해보며 검증하지 않았다** — 자동 테스트 337개는 코드
 > 정확성까지만 보증한다. 남은 항목은
